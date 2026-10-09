@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Domotz Pi Provisioner v1.0.3
+# Domotz Pi Provisioner v1.0.4
 # License: MIT
 #
 # Provisioning order:
@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 DOMOTZ_SNAP="domotzpro-agent-publicstore"
 AUTO_POLICY="/etc/apt/apt.conf.d/20auto-upgrades"
 LOCAL_POLICY="/etc/apt/apt.conf.d/52-domotz-pi-provisioner"
@@ -25,6 +25,8 @@ RESTART_DOMOTZ="${RESTART_DOMOTZ:-auto}"
 LOG_DIR="/var/log/domotz-pi-provisioner"
 LOG_FILE="$LOG_DIR/setup.log"
 BACKUP_DIR="/var/backups/domotz-pi-provisioner"
+COMPLETION_MARKER="/var/lib/domotz-pi-provisioner/rerun-required"
+MOTD_NOTICE="/etc/motd.d/99-domotz-pi-provisioner"
 ERRORS=0
 WARNINGS=0
 DOMOTZ_ALREADY_INSTALLED=false
@@ -33,6 +35,7 @@ COMPATIBILITY_CHANGED=false
 SHOULD_RESTART=false
 PENDING_BEFORE=0
 PENDING_AFTER=0
+MIN_FREE_ROOT_MB="${MIN_FREE_ROOT_MB:-2048}"
 
 if [[ -t 1 ]]; then
   GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -130,6 +133,27 @@ apt-get update && pass "APT metadata refreshed." || { fail "apt-get update faile
 
 PENDING_BEFORE="$(count_pending_updates)"
 info "Pending package updates before initial upgrade: $PENDING_BEFORE"
+
+section "DISK SPACE PREFLIGHT"
+ROOT_AVAIL_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+ROOT_AVAIL_MB=$((ROOT_AVAIL_KB / 1024))
+ROOT_AVAIL_GB="$(awk -v kb="$ROOT_AVAIL_KB" 'BEGIN {printf "%.2f", kb/1024/1024}')"
+info "Available space on root filesystem: ${ROOT_AVAIL_GB} GiB (${ROOT_AVAIL_MB} MiB)."
+info "Minimum required free space before upgrade: ${MIN_FREE_ROOT_MB} MiB."
+
+if [[ "$ROOT_AVAIL_MB" -lt "$MIN_FREE_ROOT_MB" ]]; then
+  fail "Insufficient free disk space for safe initial system update."
+  info "Free additional space on / and rerun the provisioner."
+  exit 1
+else
+  pass "Root filesystem has at least ${MIN_FREE_ROOT_MB} MiB free."
+fi
+
+APT_CACHE_AVAIL_KB="$(df -Pk /var/cache/apt 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+if [[ -n "$APT_CACHE_AVAIL_KB" ]]; then
+  APT_CACHE_AVAIL_MB=$((APT_CACHE_AVAIL_KB / 1024))
+  info "Available space for APT cache filesystem: ${APT_CACHE_AVAIL_MB} MiB."
+fi
 
 section "INITIAL SYSTEM UPDATE"
 if [[ "$PENDING_BEFORE" -gt 0 ]]; then
@@ -355,8 +379,27 @@ if [[ -f /var/run/reboot-required ]]; then
     info "Packages requesting the reboot:"
     sed 's/^/  - /' /var/run/reboot-required.pkgs
   fi
+
+  mkdir -p "$(dirname "$COMPLETION_MARKER")" /etc/motd.d
+  touch "$COMPLETION_MARKER"
+  cat > "$MOTD_NOTICE" <<'EOF'
+
+*** DOMOTZ PI PROVISIONING INCOMPLETE ***
+A reboot was required during provisioning.
+After reboot, rerun the Domotz Pi Provisioner to complete final validation.
+
+Copy/paste this command:
+curl -fsSL https://raw.githubusercontent.com/fortresstelecom/domotz-pi-provisioner/main/domotz-pi-provisioner.sh -o /tmp/domotz-pi-provisioner.sh && chmod +x /tmp/domotz-pi-provisioner.sh && sudo /tmp/domotz-pi-provisioner.sh
+
+EOF
+  chmod 644 "$MOTD_NOTICE"
+  pass "Installed post-reboot provisioning reminder for future logins."
 else
   pass "No reboot currently reported as required."
+  if [[ -f "$COMPLETION_MARKER" ]]; then
+    rm -f "$COMPLETION_MARKER" "$MOTD_NOTICE"
+    pass "Post-reboot provisioning validation completed; login reminder removed."
+  fi
 fi
 
 section "FINAL DEPLOYMENT REPORT"
@@ -364,6 +407,7 @@ echo "Version:             $SCRIPT_VERSION"
 echo "Hostname:            $(hostname)"
 echo "Architecture:        $ARCHITECTURE"
 echo "Updates before:      $PENDING_BEFORE"
+echo "Root free preflight: ${ROOT_AVAIL_MB} MiB"
 echo "Updates remaining:   $PENDING_AFTER"
 echo "Existing collector:  $DOMOTZ_ALREADY_INSTALLED"
 echo "Installed this run:  $DOMOTZ_INSTALLED_THIS_RUN"
@@ -380,6 +424,33 @@ echo
 if [[ "$ERRORS" -eq 0 ]]; then
   echo -e "${GREEN}${BOLD}DOMOTZ PI PROVISIONER VALIDATION PASSED${NC}"
   [[ "$WARNINGS" -gt 0 ]] && echo "Validation passed with $WARNINGS warning(s); review [WARN] entries above."
+
+  if [[ "$REBOOT_REQUIRED" == true ]]; then
+    echo
+    if [[ -t 0 ]]; then
+      while true; do
+        read -r -p "Reboot required. Reboot now? [y/N]: " REBOOT_RESPONSE
+        case "$REBOOT_RESPONSE" in
+          [Yy]|[Yy][Ee][Ss])
+            info "Reboot requested. Restarting system now."
+            sync
+            systemctl reboot
+            exit 0
+            ;;
+          [Nn]|[Nn][Oo]|"")
+            info "Reboot deferred. The system must be rebooted to complete the update."
+            break
+            ;;
+          *)
+            echo "Please answer Y or N."
+            ;;
+        esac
+      done
+    else
+      warn "Reboot required, but no interactive terminal is available. Reboot was not started automatically."
+    fi
+  fi
+
   exit 0
 else
   echo -e "${RED}${BOLD}DOMOTZ PI PROVISIONER VALIDATION FAILED${NC}"
