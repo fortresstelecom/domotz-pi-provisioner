@@ -104,12 +104,7 @@ if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then
   DOMOTZ_ALREADY_INSTALLED=true
   pass "Existing Domotz installation detected and will be preserved."
 else
-  if snap install "$DOMOTZ_SNAP"; then
-    DOMOTZ_INSTALLED_THIS_RUN=true
-    pass "Domotz installed."
-  else
-    fail "Domotz installation failed."
-  fi
+  if snap install "$DOMOTZ_SNAP"; then DOMOTZ_INSTALLED_THIS_RUN=true; pass "Domotz installed."; else fail "Domotz installation failed."; fi
 fi
 
 section "DOMOTZ SNAP INTERFACES"
@@ -124,12 +119,7 @@ done
 
 section "TUN SUPPORT"
 touch "$MODULES_FILE"
-if grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' "$MODULES_FILE"; then
-  pass "TUN is configured to load at boot."
-else
-  printf '\ntun\n' >> "$MODULES_FILE"
-  pass "Added TUN to $MODULES_FILE."
-fi
+if grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' "$MODULES_FILE"; then pass "TUN is configured to load at boot."; else printf '\ntun\n' >> "$MODULES_FILE"; pass "Added TUN to $MODULES_FILE."; fi
 modprobe tun && pass "TUN loaded." || fail "Unable to load TUN."
 [[ -c /dev/net/tun ]] && pass "/dev/net/tun available." || warn "/dev/net/tun unavailable."
 
@@ -138,13 +128,8 @@ if [[ -f "$LD_PRELOAD_FILE" ]]; then
   backup_once "$LD_PRELOAD_FILE"
   if grep -Eq '^[[:space:]]*[^#].*libarmmem.*\.so[[:space:]]*$' "$LD_PRELOAD_FILE"; then
     sed -Ei '/^[[:space:]]*[^#].*libarmmem.*\.so[[:space:]]*$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$LD_PRELOAD_FILE"
-    COMPATIBILITY_CHANGED=true
-    pass "Disabled the active libarmmem preload entry."
-  elif grep -Eq '^[[:space:]]*#.*libarmmem.*\.so' "$LD_PRELOAD_FILE"; then
-    pass "libarmmem preload entry is already disabled."
-  else
-    info "No libarmmem preload entry found; no change required."
-  fi
+    COMPATIBILITY_CHANGED=true; pass "Disabled the active libarmmem preload entry."
+  elif grep -Eq '^[[:space:]]*#.*libarmmem.*\.so' "$LD_PRELOAD_FILE"; then pass "libarmmem preload entry is already disabled."; else info "No libarmmem preload entry found; no change required."; fi
 else
   info "$LD_PRELOAD_FILE does not exist; no change required."
 fi
@@ -152,24 +137,15 @@ if [[ -f "$SSH_CONFIG_FILE" ]]; then
   backup_once "$SSH_CONFIG_FILE"
   if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf[[:space:]]*$' "$SSH_CONFIG_FILE"; then
     sed -Ei '/^[[:space:]]*Include[[:space:]]+\/etc\/ssh\/ssh_config\.d\/\*\.conf[[:space:]]*$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$SSH_CONFIG_FILE"
-    COMPATIBILITY_CHANGED=true
-    pass "Disabled the global SSH client Include directive."
-  elif grep -Eq '^[[:space:]]*#.*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf' "$SSH_CONFIG_FILE"; then
-    pass "Global SSH client Include directive is already disabled."
-  else
-    info "Specified SSH Include directive not found; no change required."
-  fi
+    COMPATIBILITY_CHANGED=true; pass "Disabled the global SSH client Include directive."
+  elif grep -Eq '^[[:space:]]*#.*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf' "$SSH_CONFIG_FILE"; then pass "Global SSH client Include directive is already disabled."; else info "Specified SSH Include directive not found; no change required."; fi
 else
   warn "$SSH_CONFIG_FILE does not exist."
 fi
 has ssh && { ssh -G localhost >/dev/null 2>&1 && pass "SSH client configuration parses successfully." || warn "SSH client configuration validation returned an error."; }
 
 section "DOMOTZ RESTART POLICY"
-case "$RESTART_DOMOTZ" in
-  true) SHOULD_RESTART=true;;
-  false) SHOULD_RESTART=false;;
-  auto) [[ "$DOMOTZ_INSTALLED_THIS_RUN" == true ]] && SHOULD_RESTART=true;;
-esac
+case "$RESTART_DOMOTZ" in true) SHOULD_RESTART=true;; false) SHOULD_RESTART=false;; auto) [[ "$DOMOTZ_INSTALLED_THIS_RUN" == true ]] && SHOULD_RESTART=true;; esac
 if [[ "$SHOULD_RESTART" == true ]]; then
   [[ "$DOMOTZ_ALREADY_INSTALLED" == true ]] && warn "Restarting an existing Collector may interrupt Domotz Remote Access."
   snap restart "$DOMOTZ_SNAP" && pass "Domotz restart completed." || fail "Domotz restart failed."
@@ -191,10 +167,7 @@ if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then
   else
     fail "No active Domotz service detected."
     printf '%s\n' "$SERVICES"
-    if [[ "$DOMOTZ_ALREADY_INSTALLED" == true ]]; then
-      warn "Existing Collector service state was not changed automatically."
-      warn "Review service output and logs before starting or restarting Domotz."
-    fi
+    [[ "$DOMOTZ_ALREADY_INSTALLED" == true ]] && { warn "Existing Collector service state was not changed automatically."; warn "Review service output and logs before starting or restarting Domotz."; }
   fi
 fi
 
@@ -253,18 +226,37 @@ apt-get check >/dev/null 2>&1 && pass "APT dependency check passed." || fail "AP
 
 section "UNATTENDED-UPGRADE DRY RUN"
 if [[ "$RUN_DRY_RUN" == true ]]; then
-  unattended-upgrade --dry-run > "$DRY_RUN_LOG" 2>&1 && pass "Unattended-upgrade dry run completed successfully." || { fail "Unattended-upgrade dry run failed."; tail -n 50 "$DRY_RUN_LOG" || true; }
+  info "Running unattended-upgrade dry run..."
+  info "Detailed output: $DRY_RUN_LOG"
+  unattended-upgrade --dry-run > "$DRY_RUN_LOG" 2>&1 &
+  DRY_RUN_PID=$!
+  DRY_RUN_START=$SECONDS
+  SPINNER='|/-\'
+  SPINNER_POS=0
+  while kill -0 "$DRY_RUN_PID" 2>/dev/null; do
+    ELAPSED=$((SECONDS - DRY_RUN_START))
+    SPINNER_CHAR="${SPINNER:SPINNER_POS%${#SPINNER}:1}"
+    printf "\r[....] Dry run in progress %s %02d:%02d" "$SPINNER_CHAR" "$((ELAPSED / 60))" "$((ELAPSED % 60))"
+    SPINNER_POS=$((SPINNER_POS + 1))
+    sleep 1
+  done
+  wait "$DRY_RUN_PID"
+  DRY_RUN_STATUS=$?
+  ELAPSED=$((SECONDS - DRY_RUN_START))
+  printf "\r%*s\r" 70 ""
+  ELAPSED_TEXT="$(printf '%02d:%02d' "$((ELAPSED / 60))" "$((ELAPSED % 60))")"
+  if [[ "$DRY_RUN_STATUS" -eq 0 ]]; then
+    pass "Unattended-upgrade dry run completed successfully in $ELAPSED_TEXT."
+  else
+    fail "Unattended-upgrade dry run failed after $ELAPSED_TEXT."
+    tail -n 50 "$DRY_RUN_LOG" || true
+  fi
 else
   warn "Dry run disabled with RUN_DRY_RUN=false."
 fi
 
 section "REBOOT STATUS"
-if [[ -f /var/run/reboot-required ]]; then
-  warn "Device currently reports reboot required."
-  info "Future unattended reboots use $REBOOT_TIME local time."
-else
-  pass "No reboot currently reported as required."
-fi
+if [[ -f /var/run/reboot-required ]]; then warn "Device currently reports reboot required."; info "Future unattended reboots use $REBOOT_TIME local time."; else pass "No reboot currently reported as required."; fi
 
 section "FINAL DEPLOYMENT REPORT"
 echo "Version:             $SCRIPT_VERSION"
