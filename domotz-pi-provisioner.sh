@@ -1,29 +1,40 @@
 #!/usr/bin/env bash
 
 # Domotz Pi Provisioner
-# Version: 1.0.0
+# Version: 1.0.1
 # License: MIT
 #
 # Idempotent provisioning and maintenance for Domotz collectors on
 # Raspberry Pi OS / Debian-based Raspberry Pi systems.
+#
+# v1.0.1 changes:
+#   - Existing Domotz collectors are no longer restarted by default.
+#   - Adds the Raspberry Pi compatibility adjustments documented by Domotz.
+#   - Adds RESTART_DOMOTZ=auto|true|false control.
+#   - Separates service validation from service restart behavior.
 
 set -u
 set -o pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 DOMOTZ_SNAP="domotzpro-agent-publicstore"
 LOCAL_POLICY="/etc/apt/apt.conf.d/52-domotz-pi-provisioner"
 AUTO_POLICY="/etc/apt/apt.conf.d/20auto-upgrades"
 MODULES_FILE="/etc/modules"
+LD_PRELOAD_FILE="/etc/ld.so.preload"
+SSH_CONFIG_FILE="/etc/ssh/ssh_config"
 REBOOT_TIME="${REBOOT_TIME:-02:00}"
 RUN_DRY_RUN="${RUN_DRY_RUN:-true}"
+RESTART_DOMOTZ="${RESTART_DOMOTZ:-auto}"
 LOG_DIR="/var/log/domotz-pi-provisioner"
 LOG_FILE="${LOG_DIR}/setup.log"
 DRY_RUN_LOG="${LOG_DIR}/unattended-upgrade-dry-run.log"
 BACKUP_DIR="/var/backups/domotz-pi-provisioner"
 ERRORS=0
 WARNINGS=0
+DOMOTZ_INSTALLED_THIS_RUN=false
+COMPATIBILITY_CHANGED=false
 
 if [[ -t 1 ]]; then
   GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -51,6 +62,7 @@ backup_file_once(){
 }
 
 case "$RUN_DRY_RUN" in true|false) ;; *) echo "RUN_DRY_RUN must be true or false."; exit 1;; esac
+case "$RESTART_DOMOTZ" in auto|true|false) ;; *) echo "RESTART_DOMOTZ must be auto, true, or false."; exit 1;; esac
 if [[ $EUID -ne 0 ]]; then echo "Run as root: sudo ./$SCRIPT_NAME"; exit 1; fi
 if [[ ! "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then echo "Invalid REBOOT_TIME: $REBOOT_TIME"; exit 1; fi
 
@@ -63,9 +75,11 @@ info "Version: $SCRIPT_VERSION"
 info "Hostname: $(hostname)"
 info "Started: $(date --iso-8601=seconds 2>/dev/null || date)"
 info "Reboot window: $REBOOT_TIME local time"
+info "Domotz restart policy: $RESTART_DOMOTZ"
 
 section "OPERATING SYSTEM VALIDATION"
 if [[ -r /etc/os-release ]]; then
+  # shellcheck disable=SC1091
   . /etc/os-release
   info "Operating system: ${PRETTY_NAME:-Unknown}"
   case "${ID:-}" in debian|raspbian) pass "Supported Debian-family OS detected.";; *) warn "OS does not identify as Debian/Raspbian.";; esac
@@ -97,7 +111,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y snapd unattended-upgrades ca-c
 section "SNAP SERVICE"
 systemctl daemon-reload
 systemctl enable --now snapd.socket >/dev/null 2>&1 && pass "snapd.socket enabled." || fail "Unable to enable snapd.socket."
-if [[ ! -e /snap && -d /var/lib/snapd/snap ]]; then ln -s /var/lib/snapd/snap /snap; fi
+if [[ ! -e /snap && -d /var/lib/snapd/snap ]]; then ln -s /var/lib/snapd/snap /snap; pass "Created /snap compatibility link."; fi
 command_exists snap || { fail "snap command unavailable."; exit 1; }
 
 section "DOMOTZ COLLECTOR"
@@ -106,7 +120,12 @@ if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then
   pass "Existing Domotz installation detected and will be preserved."
 else
   DOMOTZ_ALREADY_INSTALLED=false
-  snap install "$DOMOTZ_SNAP" && pass "Domotz installed." || fail "Domotz installation failed."
+  if snap install "$DOMOTZ_SNAP"; then
+    DOMOTZ_INSTALLED_THIS_RUN=true
+    pass "Domotz installed."
+  else
+    fail "Domotz installation failed."
+  fi
 fi
 
 section "DOMOTZ SNAP INTERFACES"
@@ -122,15 +141,88 @@ done
 
 section "TUN SUPPORT"
 touch "$MODULES_FILE"
-grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' "$MODULES_FILE" || printf '\ntun\n' >> "$MODULES_FILE"
+if grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' "$MODULES_FILE"; then
+  pass "TUN is configured to load at boot."
+else
+  printf '\ntun\n' >> "$MODULES_FILE"
+  pass "Added TUN to $MODULES_FILE."
+fi
 modprobe tun && pass "TUN loaded." || fail "Unable to load TUN."
 [[ -c /dev/net/tun ]] && pass "/dev/net/tun available." || warn "/dev/net/tun unavailable."
 
+section "DOMOTZ COMPATIBILITY SETTINGS"
+if [[ -f "$LD_PRELOAD_FILE" ]]; then
+  backup_file_once "$LD_PRELOAD_FILE"
+  if grep -Eq '^[[:space:]]*[^#].*libarmmem.*\.so([[:space:]]*)$' "$LD_PRELOAD_FILE"; then
+    sed -Ei '/^[[:space:]]*[^#].*libarmmem.*\.so([[:space:]]*)$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$LD_PRELOAD_FILE"
+    COMPATIBILITY_CHANGED=true
+    pass "Disabled the active libarmmem preload entry."
+  elif grep -Eq '^[[:space:]]*#.*libarmmem.*\.so' "$LD_PRELOAD_FILE"; then
+    pass "libarmmem preload entry is already disabled."
+  else
+    info "No libarmmem preload entry found; no change required."
+  fi
+else
+  info "$LD_PRELOAD_FILE does not exist; no change required."
+fi
+
+if [[ -f "$SSH_CONFIG_FILE" ]]; then
+  backup_file_once "$SSH_CONFIG_FILE"
+  if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf([[:space:]]*)$' "$SSH_CONFIG_FILE"; then
+    sed -Ei '/^[[:space:]]*Include[[:space:]]+\/etc\/ssh\/ssh_config\.d\/\*\.conf([[:space:]]*)$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$SSH_CONFIG_FILE"
+    COMPATIBILITY_CHANGED=true
+    pass "Disabled the global SSH client Include directive used by the Domotz compatibility procedure."
+  elif grep -Eq '^[[:space:]]*#.*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf' "$SSH_CONFIG_FILE"; then
+    pass "Global SSH client Include directive is already disabled."
+  else
+    info "Specified global SSH client Include directive not found; no change required."
+  fi
+else
+  warn "$SSH_CONFIG_FILE does not exist."
+fi
+
+if command_exists ssh; then
+  ssh -G localhost >/dev/null 2>&1 && pass "SSH client configuration parses successfully." || warn "SSH client configuration validation returned an error."
+fi
+
+section "DOMOTZ RESTART POLICY"
+SHOULD_RESTART=false
+case "$RESTART_DOMOTZ" in
+  true) SHOULD_RESTART=true ;;
+  false) SHOULD_RESTART=false ;;
+  auto)
+    [[ "$DOMOTZ_INSTALLED_THIS_RUN" == true ]] && SHOULD_RESTART=true
+    ;;
+esac
+
+if [[ "$SHOULD_RESTART" == true ]]; then
+  if [[ "$DOMOTZ_ALREADY_INSTALLED" == true ]]; then
+    warn "Restarting an existing Domotz Collector because RESTART_DOMOTZ=true."
+    warn "A session using Domotz Remote Access may be interrupted."
+  else
+    info "Restarting the newly installed Domotz Collector."
+  fi
+  snap restart "$DOMOTZ_SNAP" && pass "Domotz restart completed." || fail "Domotz restart failed."
+  sleep 3
+else
+  if [[ "$DOMOTZ_ALREADY_INSTALLED" == true ]]; then
+    pass "Existing Domotz Collector restart skipped to preserve remote access."
+    [[ "$COMPATIBILITY_CHANGED" == true ]] && warn "Compatibility settings changed; apply a controlled Domotz restart later if required."
+  else
+    warn "Domotz restart skipped by RESTART_DOMOTZ=false."
+  fi
+fi
+
 section "DOMOTZ SERVICE VALIDATION"
 if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then
-  snap restart "$DOMOTZ_SNAP" && pass "Domotz restarted." || fail "Domotz restart failed."
-  sleep 3
-  snap services "$DOMOTZ_SNAP" 2>/dev/null | awk 'NR>1 && $4=="active"{f=1} END{exit !f}' && pass "Domotz service active." || fail "No active Domotz service detected."
+  if snap services "$DOMOTZ_SNAP" 2>/dev/null | awk 'NR>1 && $4=="active"{f=1} END{exit !f}'; then
+    pass "At least one Domotz service is active."
+  else
+    warn "No active Domotz service detected; attempting a non-disruptive start."
+    snap start "$DOMOTZ_SNAP" && pass "Domotz start command completed." || fail "Unable to start Domotz."
+    sleep 3
+    snap services "$DOMOTZ_SNAP" 2>/dev/null | awk 'NR>1 && $4=="active"{f=1} END{exit !f}' && pass "Domotz service is active." || fail "No active Domotz service detected after start attempt."
+  fi
 fi
 
 section "AUTOMATIC UPDATE POLICY"
@@ -161,7 +253,7 @@ chmod 644 "$AUTO_POLICY" "$LOCAL_POLICY"
 pass "Automatic update policies written."
 
 section "AUTOMATIC UPDATE VALIDATION"
-if apt-config dump >/dev/null 2>&1; then pass "APT configuration parses."; else fail "APT configuration parsing failed."; fi
+apt-config dump >/dev/null 2>&1 && pass "APT configuration parses." || fail "APT configuration parsing failed."
 APT_CONFIG="$(apt-config dump 2>/dev/null || true)"
 check_cfg(){ printf '%s\n' "$APT_CONFIG" | grep -Fq "$1" && pass "$2" || fail "$2"; }
 check_cfg 'APT::Periodic::Update-Package-Lists "1";' "Daily package-list updates enabled."
@@ -169,12 +261,14 @@ check_cfg 'APT::Periodic::Unattended-Upgrade "1";' "Daily unattended upgrades en
 check_cfg 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "Unused dependency cleanup enabled."
 check_cfg 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' "Unused kernel cleanup enabled."
 check_cfg 'Unattended-Upgrade::Automatic-Reboot "true";' "Automatic reboot enabled."
+check_cfg 'Unattended-Upgrade::Automatic-Reboot-WithUsers "false";' "Automatic reboot with logged-in users disabled."
 check_cfg "Unattended-Upgrade::Automatic-Reboot-Time \"$REBOOT_TIME\";" "Automatic reboot time is $REBOOT_TIME."
 
 section "APT SYSTEMD TIMERS"
 systemctl daemon-reload
 for timer in apt-daily.timer apt-daily-upgrade.timer; do
   systemctl enable --now "$timer" >/dev/null 2>&1 && pass "$timer enabled." || fail "Unable to enable $timer."
+  systemctl is-enabled --quiet "$timer" && pass "$timer enabled at boot." || fail "$timer not enabled at boot."
   systemctl is-active --quiet "$timer" && pass "$timer active." || fail "$timer inactive."
 done
 systemctl list-timers apt-daily.timer apt-daily-upgrade.timer --all --no-pager || true
@@ -205,17 +299,19 @@ else
 fi
 
 section "FINAL DEPLOYMENT REPORT"
-echo "Version:            $SCRIPT_VERSION"
-echo "Hostname:           $(hostname)"
-echo "Architecture:       $ARCHITECTURE"
-echo "Existing collector: $DOMOTZ_ALREADY_INSTALLED"
-echo "Automatic updates:  Enabled"
-echo "Automatic cleanup:  Enabled"
-echo "Reboot time:        $REBOOT_TIME local time"
-echo "Setup log:          $LOG_FILE"
-echo "Dry-run log:        $DRY_RUN_LOG"
-echo "Errors:             $ERRORS"
-echo "Warnings:           $WARNINGS"
+echo "Version:             $SCRIPT_VERSION"
+echo "Hostname:            $(hostname)"
+echo "Architecture:        $ARCHITECTURE"
+echo "Existing collector:  $DOMOTZ_ALREADY_INSTALLED"
+echo "Installed this run:  $DOMOTZ_INSTALLED_THIS_RUN"
+echo "Domotz restarted:    $SHOULD_RESTART"
+echo "Automatic updates:   Enabled"
+echo "Automatic cleanup:   Enabled"
+echo "Reboot time:         $REBOOT_TIME local time"
+echo "Setup log:           $LOG_FILE"
+echo "Dry-run log:         $DRY_RUN_LOG"
+echo "Errors:              $ERRORS"
+echo "Warnings:            $WARNINGS"
 echo
 
 if [[ "$ERRORS" -eq 0 ]]; then
