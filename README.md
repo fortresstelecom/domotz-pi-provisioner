@@ -1,175 +1,195 @@
 # Domotz Pi Provisioner
 
-An idempotent provisioning and maintenance script for Domotz Collectors running on Raspberry Pi OS and compatible Debian-based Raspberry Pi systems.
+An idempotent provisioning, maintenance, and validation script for Domotz Collectors running on Raspberry Pi OS and compatible Debian-based Raspberry Pi systems.
 
-Domotz Pi Provisioner brings the operating system fully up to date before configuring the Collector and its ongoing automatic-update policy. It supports both new deployments and existing Domotz installations while avoiding unnecessary Collector restarts during remote maintenance.
+The provisioner updates the operating system, validates package health, installs or preserves the Domotz Collector, configures automatic updates, manages required reboots, retains diagnostic logs across restarts, and produces a clear deployment report.
 
 > **Vibe-coded, field-tested.** Developed with Microsoft Copilot and refined through hands-on testing on Raspberry Pi-based Domotz Collectors.
 
-## Current Release
+## Current Version
 
-**v1.0.4**
+**v1.0.6**
 
-Key v1.0.4 improvements include:
+## Major Changes Since v1.0.4
 
-- Mandatory initial full system update before provisioning
-- Package-manager health checks before and after the update
-- Disk-space preflight before starting the full upgrade
-- Safe handling of existing Domotz Collectors
-- Automatic-update configuration after the initial update
-- Controlled reboot prompt when required
-- Persistent post-reboot validation command
-- MOTD reminder until final post-reboot validation succeeds
+v1.0.6 adds:
+
+- Interactive and YOLO provisioning modes
+- A full-upgrade simulation before package changes
+- Operator approval for proposed package removals in Interactive mode
+- Automatic approval of proposed removals in YOLO mode
+- Separation of approved actions from unresolved warnings
+- Consolidated end-of-run findings and remediation guidance
+- A persistent provisioner command at `/usr/local/sbin/domotz-pi-provisioner`
+- Automatic post-reboot validation for YOLO deployments
+- Temporary systemd oneshot service for post-reboot continuation
+- Reboot-loop protection
+- Persistent systemd journal storage for previous-boot diagnostics
+- Process locking, trusted `PATH`, restrictive `umask`, and symbolic-link protections
+- Correct script version reporting after loading `/etc/os-release`
 
 ## Features
 
 `domotz-pi-provisioner.sh` automates and validates:
 
-- Debian and Raspberry Pi OS identification
-- Raspberry Pi hardware detection
+- Raspberry Pi OS and Debian-family identification
+- Raspberry Pi hardware identification when available
 - DNS and time-synchronization checks
-- `dpkg` and APT health validation
+- `dpkg` and APT health checks
 - APT metadata refresh
 - Pending-update detection
 - Root-filesystem disk-space preflight
-- Mandatory initial full system update
-- Post-upgrade package-manager validation
-- Remaining-update detection
+- Full-upgrade simulation
+- Package-removal review and approval
+- Initial full operating-system upgrade
+- Post-upgrade package validation
 - Snapd installation and configuration
 - Domotz Collector installation
 - Detection and preservation of existing Domotz installations
 - Required Domotz Snap interfaces
 - TUN support for Domotz VPN functionality
-- Raspberry Pi compatibility configuration used by Domotz
-- Safe restart handling for existing Collectors
-- Domotz service-status validation
-- Automatic Debian and Raspberry Pi package updates
-- Automatic removal of unused dependencies
-- Automatic removal of unused kernel packages
-- Automatic reboot when required
-- Configurable automatic reboot time
+- Safe handling of existing Collector restarts
+- Domotz service-state validation
+- Unattended-upgrades policy configuration
 - APT/systemd automatic-update timers
-- Persistent setup logging
-- Post-reboot completion tracking
-- MOTD reminder until provisioning is fully validated
-- Final PASS, WARN, and FAIL reporting
+- Configurable automatic reboot time
+- Persistent provisioner command installation
+- Reboot-required detection
+- Interactive reboot prompting
+- Automatic YOLO reboot and post-reboot validation
+- Reboot-loop prevention
+- MOTD fallback when provisioning remains incomplete
+- Persistent systemd journal storage
+- Persistent setup and simulated-upgrade logs
+- Consolidated PASS, WARN, FAIL, and IMPORTANT ACTION reporting
 
-The script is designed to be idempotent. It can be rerun to validate the system and reapply the settings managed by the provisioner.
-
-## Provisioning Workflow
-
-```text
-Preflight validation
-        ↓
-APT metadata refresh
-        ↓
-Disk-space validation
-        ↓
-Full system update
-        ↓
-Post-update package validation
-        ↓
-Required package installation
-        ↓
-Domotz provisioning and validation
-        ↓
-Automatic-update configuration
-        ↓
-Final validation
-        ↓
-Reboot prompt, when required
-        ↓
-Post-reboot provisioner rerun
-        ↓
-Provisioning complete
-```
+The script is designed to be rerun safely on systems it previously configured.
 
 ## Requirements
-
-The intended environment is:
 
 - Raspberry Pi
 - Raspberry Pi OS or a compatible Debian-based Raspberry Pi installation
 - Internet connectivity
 - Root or `sudo` access
-- Sufficient free disk space for the initial system upgrade
+- At least 2 GiB of free root-filesystem space by default
 
-The default minimum free-space requirement is **2 GiB** on the root filesystem.
+The project is focused on Raspberry Pi-based Domotz Collectors. Review and test the script before using it on other Debian-based systems.
 
-This project is focused on Raspberry Pi-based Domotz Collectors. Review and test the script before using it on other Debian-based systems.
+## New-System Installation
 
-## Installation
+### Guided mode selection
 
-### 1. Download v1.0.4
-
-```bash
-wget https://raw.githubusercontent.com/fortresstelecom/domotz-pi-provisioner/v1.0.4/domotz-pi-provisioner.sh
-```
-
-### 2. Make the script executable
+This command downloads the current `main` version and prompts the operator to select Interactive or YOLO mode:
 
 ```bash
-chmod +x domotz-pi-provisioner.sh
+curl -fsSL https://raw.githubusercontent.com/fortresstelecom/domotz-pi-provisioner/main/domotz-pi-provisioner.sh -o ~/domotz-pi-provisioner.sh && chmod +x ~/domotz-pi-provisioner.sh && sudo ~/domotz-pi-provisioner.sh
 ```
 
-### 3. Validate Bash syntax
+### Fully automatic YOLO mode
 
 ```bash
-bash -n domotz-pi-provisioner.sh
+curl -fsSL https://raw.githubusercontent.com/fortresstelecom/domotz-pi-provisioner/main/domotz-pi-provisioner.sh -o ~/domotz-pi-provisioner.sh && chmod +x ~/domotz-pi-provisioner.sh && sudo ~/domotz-pi-provisioner.sh --yolo
 ```
 
-No output indicates that Bash did not detect a syntax error.
+For a published release, replace `main` in the download URL with the desired release tag.
 
-### 4. Run the provisioner
+## Mode Selection
+
+Running the provisioner without arguments displays:
+
+```text
+Select provisioner mode:
+  1) Interactive - prompt before package removals and reboot
+  2) YOLO        - approve package removals and reboot automatically
+
+Mode [1/2]:
+```
+
+### Interactive mode
+
+Interactive mode:
+
+- Displays package removals proposed by the upgrade simulation
+- Requires explicit approval before package removals
+- Prompts before rebooting
+- Defaults to No at approval prompts
+- Requires an interactive terminal
+
+### YOLO mode
+
+Run YOLO mode directly with:
 
 ```bash
-sudo ./domotz-pi-provisioner.sh
+sudo domotz-pi-provisioner --yolo
 ```
 
-For a large initial update, consider running the provisioner inside a persistent terminal session such as `tmux`.
+YOLO mode:
+
+- Automatically approves package removals identified by the simulation
+- Runs unattended after startup
+- Automatically reboots when required
+- Automatically performs post-reboot validation
+- Retains fatal safety checks
+- Prevents repeated automatic reboot cycles
+
+YOLO does not bypass package-health checks, disk-space validation, DNS checks, symbolic-link protections, process locking, or fatal installation errors.
 
 ## Initial System Update
 
-The provisioner refreshes APT metadata and installs all currently available updates before configuring Domotz or enabling ongoing automatic updates.
+Before Domotz configuration, the provisioner:
 
-This establishes a fully updated operating-system baseline before provisioning continues.
+1. Checks `dpkg` and APT health.
+2. Refreshes package metadata.
+3. Counts pending updates.
+4. Verifies available disk space.
+5. Simulates a full upgrade.
+6. Reviews proposed package removals.
+7. Performs the full system update.
+8. Checks package health and pending updates again.
 
-The initial update uses a noninteractive full upgrade and preserves existing package configuration files when package prompts occur.
+The simulated upgrade plan is saved at:
 
-The provisioner records:
+```text
+/var/log/domotz-pi-provisioner/full-upgrade-plan.log
+```
 
-- Number of pending updates before the upgrade
-- Number of remaining updates after the upgrade
-- Package-manager health before and after the upgrade
-- Whether the update requires a reboot
+## Package-Removal Handling
+
+A full upgrade may propose removing installed packages.
+
+### Interactive mode
+
+The proposed removals are displayed and the operator is asked:
+
+```text
+Allow these package removals and continue? [y/N]:
+```
+
+Approved removals are recorded under `IMPORTANT ACTIONS` rather than counted as warnings.
+
+### YOLO mode
+
+YOLO automatically approves the simulated removals and records that decision under `IMPORTANT ACTIONS`.
 
 ## Disk-Space Preflight
 
-Before starting the full system update, the provisioner checks available space on the root filesystem.
-
-The default requirement is:
+The default minimum available root-filesystem space is:
 
 ```text
 2048 MiB
 ```
 
-If insufficient space is available, the provisioner stops before package installation begins.
-
-### Change the minimum free-space requirement
+Override it when necessary:
 
 ```bash
 sudo MIN_FREE_ROOT_MB="4096" ./domotz-pi-provisioner.sh
 ```
 
-The final deployment report records the free-space value measured during the preflight.
+The provisioner stops before package installation if the minimum is not met.
 
 ## Existing Domotz Installations
 
-The provisioner can be run on Raspberry Pi systems where the Domotz Collector is already installed.
-
-When an existing Domotz Snap installation is detected, the script preserves it while validating or applying the supporting system configuration and automatic-update policy.
-
-### Existing Collectors are not restarted by default
+Existing Domotz Snap installations are detected and preserved.
 
 The default restart policy is:
 
@@ -179,24 +199,10 @@ RESTART_DOMOTZ=auto
 
 With `auto`:
 
-- A newly installed Domotz Collector may be restarted during initial provisioning.
-- An existing Domotz Collector is not automatically restarted.
+- A newly installed Collector may be restarted during provisioning.
+- An existing Collector is not restarted automatically.
 
-This helps prevent disruption when the administrator is connected through Domotz Remote Access.
-
-## Domotz Restart Control
-
-### Default behavior
-
-```bash
-sudo ./domotz-pi-provisioner.sh
-```
-
-is equivalent to:
-
-```bash
-sudo RESTART_DOMOTZ=auto ./domotz-pi-provisioner.sh
-```
+This protects sessions that depend on Domotz Remote Access.
 
 ### Force a Domotz restart
 
@@ -204,72 +210,135 @@ sudo RESTART_DOMOTZ=auto ./domotz-pi-provisioner.sh
 sudo RESTART_DOMOTZ=true ./domotz-pi-provisioner.sh
 ```
 
-> **Warning:** Forcing a restart of an existing Collector may interrupt a session that depends on Domotz Remote Access. Only force a restart when another management path is available or the interruption is acceptable.
+> **Warning:** Forcing a restart may interrupt a session that depends on Domotz Remote Access.
 
-### Prevent all Domotz restarts
+### Prevent a Domotz restart
 
 ```bash
 sudo RESTART_DOMOTZ=false ./domotz-pi-provisioner.sh
 ```
 
-## Domotz Compatibility Configuration
+## Persistent Provisioner Command
 
-The provisioner checks and applies Raspberry Pi compatibility settings used by the Domotz installation procedure when applicable.
-
-These include:
-
-- Required Domotz Snap interface connections
-- TUN module configuration
-- `/etc/ld.so.preload` compatibility handling
-- `/etc/ssh/ssh_config` compatibility handling
-
-Original copies of managed configuration files are retained under:
+Each successful startup installs the current script at:
 
 ```text
-/var/backups/domotz-pi-provisioner/
+/usr/local/sbin/domotz-pi-provisioner
 ```
 
-## Domotz Service Validation
-
-The provisioner validates the Collector with:
+Future runs can use:
 
 ```bash
-sudo snap services domotzpro-agent-publicstore
+sudo domotz-pi-provisioner
 ```
 
-A healthy existing Collector should report a service state similar to:
+or:
+
+```bash
+sudo domotz-pi-provisioner --yolo
+```
+
+The provisioner detects when it is already running from the persistent destination and does not attempt to overwrite itself.
+
+## Reboot Workflow
+
+### Interactive mode
+
+When a reboot is required, the operator is prompted:
 
 ```text
-Startup  Current
- enabled  active
+Reboot required. Reboot now? [y/N]:
 ```
 
-The provisioner reads the `Current` column when validating active service status.
+If provisioning still requires completion after reboot, the login MOTD directs the operator to rerun:
+
+```bash
+sudo domotz-pi-provisioner
+```
+
+### YOLO mode
+
+When YOLO detects a required reboot, it:
+
+1. Creates a completion marker.
+2. Installs a temporary systemd oneshot service.
+3. Keeps an MOTD fallback reminder.
+4. Reboots automatically.
+5. Waits for `network-online.target` after startup.
+6. Runs the persistent provisioner with `--yolo --post-reboot`.
+7. Performs final validation.
+8. Removes the marker, MOTD, and temporary service after successful completion.
+
+The temporary service is:
+
+```text
+/etc/systemd/system/domotz-pi-provisioner-post-reboot.service
+```
+
+Check it with:
+
+```bash
+sudo systemctl status domotz-pi-provisioner-post-reboot.service
+```
+
+View its log with:
+
+```bash
+sudo journalctl -u domotz-pi-provisioner-post-reboot.service --no-pager
+```
+
+### Reboot-loop protection
+
+If the automatic post-reboot run still detects another reboot requirement, the provisioner does not initiate another automatic reboot. It leaves the fallback MOTD in place and directs the operator to review the system and service journal.
+
+## Persistent System Journal
+
+v1.0.6 enables persistent systemd journal storage by:
+
+- Creating `/var/log/journal` when needed
+- Applying system journal permissions with `systemd-tmpfiles`
+- Flushing the current runtime journal to disk
+
+This preserves system, kernel, networking, SSH, package, and service logs across reboot or power interruption.
+
+List recorded boots:
+
+```bash
+sudo journalctl --list-boots
+```
+
+Review the previous boot:
+
+```bash
+sudo journalctl -b -1
+```
+
+Check persistent journal usage:
+
+```bash
+sudo journalctl --directory=/var/log/journal --disk-usage
+```
 
 ## Automatic Updates
-
-After the initial full system update completes, the provisioner configures unattended updates.
-
-The policy permits eligible packages from:
-
-- Debian base repositories
-- Debian stable updates
-- Debian security repositories
-- Raspberry Pi Foundation repositories
-
-The policy does not use a wildcard to trust every third-party APT repository automatically.
 
 The provisioner configures:
 
 - Daily package-list updates
 - Daily unattended upgrades
-- Removal of unused dependencies
-- Removal of unused kernel packages
+- Automatic cleanup of unused dependencies
+- Automatic cleanup of unused kernel packages
 - Automatic reboot when required
 - Prevention of automatic reboot while interactive users are logged in
-- A configurable reboot time
+- Configurable reboot time
 
-The provisioner uses a separate local APT policy file rather than directly editing the distribution-supplied unattended-upgrades policy.
+The policy permits eligible packages from:
+
+- Debian base repositories
+- Debian updates
+- Debian security repositories
+- Raspberry Pi Foundation repositories
+
+The script uses a separate local policy file rather than directly changing the distribution-supplied unattended-upgrades configuration.
 
 ## Automatic Reboot Time
 
@@ -279,135 +348,97 @@ The default automatic reboot time is:
 02:00 local time
 ```
 
-To use another maintenance window:
+Set another maintenance time with:
 
 ```bash
 sudo REBOOT_TIME="03:00" ./domotz-pi-provisioner.sh
 ```
 
-The time must use 24-hour `HH:MM` format.
+The value must use 24-hour `HH:MM` format.
 
-Options can be combined:
+## Reporting
 
-```bash
-sudo REBOOT_TIME="03:00" MIN_FREE_ROOT_MB="4096" ./domotz-pi-provisioner.sh
-```
+The provisioner reports:
 
-## Interactive Reboot Prompt
+- `[PASS]` for successful validation
+- `[INFO]` for normal actions and operator-approved changes
+- `[WARN]` for unresolved or unexpected conditions
+- `[FAIL]` for provisioning or validation failures
 
-When the initial update requires a reboot, the provisioner completes its remaining configuration and then prompts:
+### Important Actions
 
-```text
-Reboot required. Reboot now? [y/N]:
-```
-
-Responses:
-
-- `Y` or `Yes` performs a graceful reboot.
-- `N`, `No`, or Enter defers the reboot.
-- Noninteractive runs never initiate the reboot automatically.
-
-## Persistent Provisioner Command
-
-Each run installs a persistent copy of the provisioner at:
+Approved package removals appear under:
 
 ```text
-/usr/local/sbin/domotz-pi-provisioner
+IMPORTANT ACTIONS
 ```
 
-This provides a short maintenance command that survives reboot:
+These actions remain visible for audit purposes but do not increase the warning count.
 
-```bash
-sudo domotz-pi-provisioner
-```
+### Findings Requiring Review
 
-## Post-Reboot Completion Workflow
-
-When a reboot is required, the provisioner creates:
+Warnings and failures are repeated near the end under:
 
 ```text
-/var/lib/domotz-pi-provisioner/rerun-required
-/etc/motd.d/99-domotz-pi-provisioner
+FINDINGS REQUIRING REVIEW
 ```
 
-At the next login, the MOTD displays:
-
-```text
-*** DOMOTZ PI PROVISIONING INCOMPLETE ***
-A reboot was required during provisioning.
-Rerun the provisioner to complete final validation.
-
-Copy/paste:
-sudo domotz-pi-provisioner
-```
-
-After reboot, run:
-
-```bash
-sudo domotz-pi-provisioner
-```
-
-When post-reboot validation succeeds and no further reboot is required, the provisioner removes the completion marker and MOTD reminder.
-
-The persistent command remains installed for future maintenance runs.
-
-## Validation Results
-
-Checks are reported as:
-
-```text
-[PASS]
-```
-
-for successful validation,
-
-```text
-[WARN]
-```
-
-for conditions requiring review, and
-
-```text
-[FAIL]
-```
-
-for failed configuration or operational checks.
-
-A successful run ends with:
-
-```text
-DOMOTZ PI PROVISIONER VALIDATION PASSED
-```
-
-A reboot-required warning is expected when the initial update installs a new kernel, firmware, or another package that requires a restart.
+The summary includes context, diagnostic commands, remediation guidance, and relevant log paths so operators do not need terminal scrollback.
 
 ## Logs
 
-The provisioner log is stored at:
+Provisioner output:
 
 ```text
 /var/log/domotz-pi-provisioner/setup.log
 ```
 
-View it with:
-
-```bash
-sudo less /var/log/domotz-pi-provisioner/setup.log
-```
-
-View recent entries with:
-
-```bash
-sudo tail -100 /var/log/domotz-pi-provisioner/setup.log
-```
-
-System unattended-upgrade logs are stored under:
+Upgrade simulation:
 
 ```text
-/var/log/unattended-upgrades/
+/var/log/domotz-pi-provisioner/full-upgrade-plan.log
+```
+
+View recent provisioner output:
+
+```bash
+sudo tail -200 /var/log/domotz-pi-provisioner/setup.log
+```
+
+View APT transaction output:
+
+```bash
+sudo less -r /var/log/apt/term.log
+```
+
+Review previous system boot:
+
+```bash
+sudo journalctl -b -1
 ```
 
 ## Troubleshooting
+
+### Check package state
+
+```bash
+sudo dpkg --audit
+sudo apt-get check
+```
+
+### Recover an interrupted package configuration
+
+```bash
+sudo dpkg --configure -a
+```
+
+If dependency repair is required:
+
+```bash
+sudo apt-get -f install
+```
+
+Do not delete APT/dpkg lock files while package processes are active.
 
 ### Check Domotz service state
 
@@ -421,54 +452,96 @@ sudo snap services domotzpro-agent-publicstore
 sudo snap logs domotzpro-agent-publicstore -n 100
 ```
 
-### Check package dependencies
+### Check required Snap interfaces
 
 ```bash
-sudo apt-get check
+sudo snap connections domotzpro-agent-publicstore
 ```
 
-### Audit incomplete package operations
+### Check TUN support
 
 ```bash
-sudo dpkg --audit
+ls -l /dev/net/tun
+lsmod | grep '^tun'
 ```
 
-### Check for a required reboot
+### Check automatic-update timers
+
+```bash
+systemctl status apt-daily.timer apt-daily-upgrade.timer
+```
+
+### Check whether a reboot is required
 
 ```bash
 if [ -f /var/run/reboot-required ]; then cat /var/run/reboot-required; else echo "No reboot required"; fi
 ```
 
-### Check pending updates
+## Security Design
 
-```bash
-apt list --upgradable 2>/dev/null
-```
+v1.0.6 includes:
+
+- Trusted root `PATH`
+- Restrictive `umask`
+- Explicit root ownership and permissions
+- Symbolic-link destination checks
+- Nonblocking process lock
+- Full-upgrade simulation
+- Interactive approval or recorded YOLO approval for package removals
+- Disk-space validation
+- Immediate stop on fatal package or Domotz installation failures
+- One-cycle automatic reboot protection
+- Persistent logs for post-incident review
+
+This script runs with root privileges and makes system-level changes. Review it before production deployment.
+
+Do not store credentials, API keys, access tokens, private keys, customer secrets, or customer-specific network information in the public repository.
 
 ## Version History
 
+### v1.0.6
+
+- Added Interactive and YOLO run modes
+- Added mode-selection prompt when no argument is supplied
+- Added `--yolo` for unattended provisioning
+- Added automatic package-removal approval in YOLO mode
+- Added operator package-removal approval in Interactive mode
+- Added consolidated findings and remediation guidance
+- Added `IMPORTANT ACTIONS` reporting
+- Added automatic post-reboot YOLO validation using systemd
+- Added reboot-loop protection
+- Added persistent system journal storage
+- Added trusted root path, restrictive permissions, symbolic-link protections, and process locking
+- Added upgrade simulation and package-removal review
+- Corrected script-version reporting
+- Corrected persistent-launcher self-copy behavior
+
+### v1.0.5
+
+- Added security hardening and upgrade safeguards
+- Added process locking and privileged-path protections
+- Added full-upgrade simulation
+- Blocked unreviewed package removals
+- Corrected version reporting and persistent-launcher behavior
+
 ### v1.0.4
 
-- Adds mandatory initial full system updating before Domotz provisioning
-- Adds pre- and post-upgrade package-manager health validation
-- Adds pending-update counts before and after the upgrade
-- Adds a configurable disk-space preflight
-- Adds an interactive reboot prompt
-- Adds persistent post-reboot completion tracking
-- Adds an MOTD reminder when post-reboot validation remains incomplete
-- Installs a persistent `sudo domotz-pi-provisioner` maintenance command
-- Removes the MOTD reminder after successful post-reboot validation
+- Added initial full system update workflow
+- Added package-health checks and disk-space preflight
+- Added reboot-required detection and operator prompt
+- Added persistent provisioner command
+- Added post-reboot MOTD completion reminder
 
 ### v1.0.3
 
-- Introduced mandatory initial full system updating
+- Introduced mandatory initial system updating
 - Removed the unattended-upgrade dry-run requirement
 - Added reboot-requirement reporting
 
 ### v1.0.2
 
-- Corrected Domotz Snap service-status validation
-- Made existing-Collector service validation read-only
+- Corrected Domotz Snap service-state validation
+- Made existing-Collector validation read-only
 
 ### v1.0.1
 
@@ -480,55 +553,26 @@ apt list --upgradable 2>/dev/null
 
 Initial public release.
 
-v1.0.0 unconditionally restarted the Collector during service validation. A session depending on Domotz Remote Access could therefore be interrupted. Later releases supersede v1.0.0 for new and existing deployments.
+## Domotz Activation
 
-## Security
+New installations may still require Collector activation after provisioning.
 
-This script runs with root privileges and makes system-level configuration changes.
+Refer to the official Domotz Raspberry Pi installation documentation for activation requirements.
 
-**Always review the script before executing it on production infrastructure.**
-
-Do not add any of the following to a public repository or fork:
-
-- Passwords
-- API keys
-- Access tokens
-- Private keys
-- Customer credentials
-- Customer-specific network information
-- Other secrets
-
-For production use, download and review the script before executing it rather than piping remote content directly into a root shell.
-
-## Domotz Setup and Activation
-
-New installations may still require Collector activation after the operating system and Collector have been provisioned.
-
-Refer to the [official Domotz Raspberry Pi installation documentation](https://help.domotz.com/onboarding-guides/domotz-installation-raspberry-pi/).
-
-This project is an independent automation project and is not an official Domotz distribution or installer.
-
-Domotz and related product names and trademarks belong to their respective owners.
+This is an independent automation project and is not an official Domotz distribution or installer. Domotz and related product names and trademarks belong to their respective owners.
 
 ## Project Scope
 
-This project exists to make Raspberry Pi-based Domotz Collector deployments repeatable, maintainable, and verifiable.
-
-The goal is to leave the host with:
+The goal is to leave the Collector host with:
 
 - A fully updated operating-system baseline
 - A validated Domotz Collector
 - A known automatic-update policy
 - A controlled reboot workflow
-- A clear post-reboot validation state
+- A clear post-reboot completion state
+- Persistent service and system diagnostics
 - A persistent maintenance command
-- A final deployment result that can be reviewed and logged
-
-## Development Note
-
-**Vibe-coded, field-tested.**
-
-Developed with Microsoft Copilot and refined through hands-on testing on Raspberry Pi-based Domotz Collectors.
+- A final result suitable for technical review
 
 ## License
 
@@ -537,5 +581,3 @@ This project is licensed under the [MIT License](LICENSE).
 ## Maintainer
 
 **Fortress Telecom, LLC**
-
-[View the Domotz Pi Provisioner repository](https://github.com/fortresstelecom/domotz-pi-provisioner)
