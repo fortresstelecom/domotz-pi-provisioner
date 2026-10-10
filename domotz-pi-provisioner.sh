@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Domotz Pi Provisioner v1.0.5
+# Domotz Pi Provisioner v1.0.6
 # License: MIT
 
 set -u
@@ -9,12 +9,13 @@ PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 export PATH
 umask 027
 
-SCRIPT_VERSION="1.0.5"
+SCRIPT_VERSION="1.0.6"
 DOMOTZ_SNAP="domotzpro-agent-publicstore"
 REBOOT_TIME="${REBOOT_TIME:-02:00}"
 RESTART_DOMOTZ="${RESTART_DOMOTZ:-auto}"
 MIN_FREE_ROOT_MB="${MIN_FREE_ROOT_MB:-2048}"
-ALLOW_PACKAGE_REMOVALS="${ALLOW_PACKAGE_REMOVALS:-false}"
+RUN_MODE="${RUN_MODE:-}"
+MODE_EXPLICIT=false
 
 LOG_DIR="/var/log/domotz-pi-provisioner"
 LOG_FILE="$LOG_DIR/setup.log"
@@ -27,6 +28,9 @@ LOCAL_POLICY="/etc/apt/apt.conf.d/52-domotz-pi-provisioner"
 PERSISTENT_LAUNCHER="/usr/local/sbin/domotz-pi-provisioner"
 COMPLETION_MARKER="$STATE_DIR/rerun-required"
 MOTD_NOTICE="/etc/motd.d/99-domotz-pi-provisioner"
+POST_REBOOT_UNIT="/etc/systemd/system/domotz-pi-provisioner-post-reboot.service"
+POST_REBOOT_UNIT_NAME="domotz-pi-provisioner-post-reboot.service"
+POST_REBOOT_RUN=false
 MODULES_FILE="/etc/modules"
 LD_PRELOAD_FILE="/etc/ld.so.preload"
 SSH_CONFIG_FILE="/etc/ssh/ssh_config"
@@ -96,10 +100,59 @@ count_pending_updates() {
   apt list --upgradable 2>/dev/null | awk 'NR > 1 {count++} END {print count+0}'
 }
 
-[[ $EUID -eq 0 ]] || { echo "Run with sudo or as root."; exit 1; }
 case "$RESTART_DOMOTZ" in auto|true|false) ;; *) echo "RESTART_DOMOTZ must be auto, true, or false"; exit 1 ;; esac
-case "$ALLOW_PACKAGE_REMOVALS" in true|false) ;; *) echo "ALLOW_PACKAGE_REMOVALS must be true or false"; exit 1 ;; esac
 [[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "REBOOT_TIME must use HH:MM format"; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yolo) RUN_MODE="yolo"; MODE_EXPLICIT=true ;;
+    --post-reboot) POST_REBOOT_RUN=true ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: domotz-pi-provisioner [--yolo]
+
+  No argument    Prompt the operator to select Interactive or YOLO mode.
+  --yolo         Approve simulated package removals and reboot automatically
+                 when required. Safety checks and fatal validation failures
+                 remain enforced.
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+  shift
+done
+
+if [[ "$MODE_EXPLICIT" == false && -n "$RUN_MODE" ]]; then
+  case "$RUN_MODE" in interactive|yolo) MODE_EXPLICIT=true ;; *) echo "RUN_MODE must be interactive or yolo"; exit 1 ;; esac
+fi
+
+if [[ "$MODE_EXPLICIT" == false ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "No run mode selected. Run from a terminal without arguments, or use --yolo."
+    exit 1
+  fi
+
+  echo "Select provisioner mode:"
+  echo "  1) Interactive - prompt before package removals and reboot"
+  echo "  2) YOLO        - approve package removals and reboot automatically"
+  while true; do
+    read -r -p "Mode [1/2]: " mode_choice
+    case "$mode_choice" in
+      1|interactive|Interactive) RUN_MODE="interactive"; break ;;
+      2|yolo|YOLO|Yolo) RUN_MODE="yolo"; break ;;
+      *) echo "Enter 1 for Interactive or 2 for YOLO." ;;
+    esac
+  done
+fi
+
+case "$RUN_MODE" in interactive|yolo) ;; *) echo "RUN_MODE must be interactive or yolo"; exit 1 ;; esac
+if [[ "$RUN_MODE" == interactive && ! -t 0 ]]; then
+  echo "Interactive mode requires a terminal."
+  exit 1
+fi
+
+[[ $EUID -eq 0 ]] || { echo "Run with sudo or as root."; exit 1; }
 [[ "$MIN_FREE_ROOT_MB" =~ ^[0-9]+$ ]] || { echo "MIN_FREE_ROOT_MB must be numeric"; exit 1; }
 
 has flock || { echo "flock is required but unavailable."; exit 1; }
@@ -118,6 +171,13 @@ touch "$LOG_FILE"
 chown root:root "$LOG_FILE"
 chmod 0640 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+if [[ "$POST_REBOOT_RUN" == true ]]; then
+  RUN_MODE="yolo"
+  MODE_EXPLICIT=true
+  info "Automatic YOLO post-reboot validation started by systemd."
+  systemctl disable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1 || true
+fi
 
 section "PERSISTENT PROVISIONER COMMAND"
 CURRENT_SCRIPT="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
@@ -139,7 +199,7 @@ info "Hostname: $(hostname)"
 info "Started: $(date --iso-8601=seconds 2>/dev/null || date)"
 info "Reboot window: $REBOOT_TIME local time"
 info "Domotz restart policy: $RESTART_DOMOTZ"
-info "Package removal policy: $ALLOW_PACKAGE_REMOVALS"
+info "Run mode: $RUN_MODE"
 info "Setup log: $LOG_FILE"
 
 section "OPERATING SYSTEM VALIDATION"
@@ -227,13 +287,21 @@ fi
 REMOVAL_COUNT="$(grep -c '^Remv ' "$UPGRADE_PLAN" || true)"
 info "Proposed package removals: $REMOVAL_COUNT"
 if [[ "$REMOVAL_COUNT" -gt 0 ]]; then
+  warn "The full upgrade proposes removing $REMOVAL_COUNT installed package(s):"
   grep '^Remv ' "$UPGRADE_PLAN"
-  if [[ "$ALLOW_PACKAGE_REMOVALS" != true ]]; then
-    fail "Full-upgrade proposes removing installed packages."
-    info "Review $UPGRADE_PLAN and rerun with ALLOW_PACKAGE_REMOVALS=true only if the removals are approved."
-    exit 1
+
+  if [[ "$RUN_MODE" == yolo ]]; then
+    warn "YOLO mode automatically approved the proposed package removals."
+  else
+    while true; do
+      read -r -p "Allow these package removals and continue? [y/N]: " removal_response
+      case "$removal_response" in
+        [Yy]|[Yy][Ee][Ss]) warn "Package removals explicitly approved."; break ;;
+        [Nn]|[Nn][Oo]|"") info "Package removals were not approved."; fail "Provisioning stopped for safety."; exit 1 ;;
+        *) echo "Please answer Y or N." ;;
+      esac
+    done
   fi
-  warn "Proceeding with approved package removals."
 else
   pass "Full-upgrade simulation proposes no package removals."
 fi
@@ -395,20 +463,55 @@ done
 section "REBOOT STATUS"
 reject_symlink "$MOTD_NOTICE"
 reject_symlink "$COMPLETION_MARKER"
+reject_symlink "$POST_REBOOT_UNIT"
 if [[ -f /var/run/reboot-required ]]; then
   REBOOT_REQUIRED=true
   warn "System updates require a reboot."
   touch "$COMPLETION_MARKER"
   chown root:root "$COMPLETION_MARKER"
   chmod 0640 "$COMPLETION_MARKER"
+
+  if [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == false ]]; then
+    cat > "$POST_REBOOT_UNIT" <<EOF
+[Unit]
+Description=Complete Domotz Pi Provisioning After Reboot
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=$COMPLETION_MARKER
+
+[Service]
+Type=oneshot
+ExecStart=$PERSISTENT_LAUNCHER --yolo --post-reboot
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chown root:root "$POST_REBOOT_UNIT"
+    chmod 0644 "$POST_REBOOT_UNIT"
+    systemctl daemon-reload
+    systemctl enable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1
+    pass "Installed one-time automatic post-reboot validation service."
+  elif [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == true ]]; then
+    warn "Post-reboot validation still reports another reboot requirement."
+    warn "Automatic reboot cycling has been stopped to prevent a reboot loop."
+  fi
+
   cat > "$MOTD_NOTICE" <<'EOF'
 
 *** DOMOTZ PI PROVISIONING INCOMPLETE ***
-A reboot was required during provisioning.
-Rerun the provisioner to complete final validation.
+A reboot or final validation is still required.
 
-Copy/paste:
+Guided mode selection:
 sudo domotz-pi-provisioner
+
+Fully automatic mode:
+sudo domotz-pi-provisioner --yolo
+
+Check automatic post-reboot validation:
+sudo systemctl status domotz-pi-provisioner-post-reboot.service
+sudo journalctl -u domotz-pi-provisioner-post-reboot.service --no-pager
 
 EOF
   chown root:root "$MOTD_NOTICE"
@@ -418,13 +521,16 @@ else
   pass "No reboot required."
   if [[ -f "$COMPLETION_MARKER" ]]; then
     rm -f -- "$COMPLETION_MARKER" "$MOTD_NOTICE"
-    pass "Post-reboot validation complete; login reminder removed."
+    systemctl disable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1 || true
+    rm -f -- "$POST_REBOOT_UNIT"
+    systemctl daemon-reload
+    pass "Post-reboot validation complete; reminder and temporary service removed."
   fi
 fi
 
 section "FINAL DEPLOYMENT REPORT"
-printf 'Version:             %s\nHostname:            %s\nArchitecture:        %s\nUpdates before:      %s\nRoot free preflight: %s MiB\nUpdates remaining:   %s\nExisting collector:  %s\nInstalled this run:  %s\nDomotz restarted:    %s\nReboot required:     %s\nSetup log:           %s\nUpgrade plan:        %s\nErrors:              %s\nWarnings:            %s\n' \
-  "$SCRIPT_VERSION" "$(hostname)" "$ARCHITECTURE" "$PENDING_BEFORE" "$ROOT_FREE_MB" "$PENDING_AFTER" \
+printf 'Version:             %s\nRun mode:            %s\nPost-reboot run:     %s\nHostname:            %s\nArchitecture:        %s\nUpdates before:      %s\nRoot free preflight: %s MiB\nUpdates remaining:   %s\nExisting collector:  %s\nInstalled this run:  %s\nDomotz restarted:    %s\nReboot required:     %s\nSetup log:           %s\nUpgrade plan:        %s\nErrors:              %s\nWarnings:            %s\n' \
+  "$SCRIPT_VERSION" "$RUN_MODE" "$POST_REBOOT_RUN" "$(hostname)" "$ARCHITECTURE" "$PENDING_BEFORE" "$ROOT_FREE_MB" "$PENDING_AFTER" \
   "$EXISTING_COLLECTOR" "$INSTALLED_THIS_RUN" "$DOMOTZ_RESTARTED" "$REBOOT_REQUIRED" \
   "$LOG_FILE" "$UPGRADE_PLAN" "$ERRORS" "$WARNINGS"
 
@@ -432,18 +538,25 @@ if [[ "$ERRORS" -eq 0 ]]; then
   echo -e "${GREEN}${BOLD}DOMOTZ PI PROVISIONER VALIDATION PASSED${RESET}"
   [[ "$WARNINGS" -gt 0 ]] && echo "Validation passed with $WARNINGS warning(s); review [WARN] entries above."
   if [[ "$REBOOT_REQUIRED" == true ]]; then
-    if [[ -t 0 ]]; then
-      while true; do
-        read -r -p "Reboot required. Reboot now? [y/N]: " response
-        case "$response" in
-          [Yy]|[Yy][Ee][Ss]) info "Rebooting now."; sync; systemctl reboot; exit 0 ;;
-          [Nn]|[Nn][Oo]|"") info "Reboot deferred. Run sudo domotz-pi-provisioner after reboot."; break ;;
-          *) echo "Please answer Y or N." ;;
-        esac
-      done
-    else
-      warn "Reboot required; noninteractive execution did not reboot automatically."
+    if [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == false ]]; then
+      warn "YOLO mode approved the required reboot. Rebooting now."
+      sync
+      systemctl reboot
+      exit 0
+    elif [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == true ]]; then
+      warn "Automatic post-reboot validation did not clear the reboot requirement."
+      warn "No additional automatic reboot will be performed. Review the MOTD and service journal."
+      exit 0
     fi
+
+    while true; do
+      read -r -p "Reboot required. Reboot now? [y/N]: " response
+      case "$response" in
+        [Yy]|[Yy][Ee][Ss]) info "Rebooting now."; sync; systemctl reboot; exit 0 ;;
+        [Nn]|[Nn][Oo]|"") info "Reboot deferred. Run sudo domotz-pi-provisioner after reboot."; break ;;
+        *) echo "Please answer Y or N." ;;
+      esac
+    done
   fi
   exit 0
 else
