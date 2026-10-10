@@ -4,7 +4,6 @@
 
 set -u
 set -o pipefail
-
 PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 export PATH
 umask 027
@@ -16,6 +15,7 @@ RESTART_DOMOTZ="${RESTART_DOMOTZ:-auto}"
 MIN_FREE_ROOT_MB="${MIN_FREE_ROOT_MB:-2048}"
 RUN_MODE="${RUN_MODE:-}"
 MODE_EXPLICIT=false
+POST_REBOOT_RUN=false
 
 LOG_DIR="/var/log/domotz-pi-provisioner"
 LOG_FILE="$LOG_DIR/setup.log"
@@ -25,83 +25,133 @@ STATE_DIR="/var/lib/domotz-pi-provisioner"
 LOCK_FILE="/run/lock/domotz-pi-provisioner.lock"
 AUTO_POLICY="/etc/apt/apt.conf.d/20auto-upgrades"
 LOCAL_POLICY="/etc/apt/apt.conf.d/52-domotz-pi-provisioner"
-PERSISTENT_LAUNCHER="/usr/local/sbin/domotz-pi-provisioner"
-COMPLETION_MARKER="$STATE_DIR/rerun-required"
-MOTD_NOTICE="/etc/motd.d/99-domotz-pi-provisioner"
-POST_REBOOT_UNIT="/etc/systemd/system/domotz-pi-provisioner-post-reboot.service"
-POST_REBOOT_UNIT_NAME="domotz-pi-provisioner-post-reboot.service"
-POST_REBOOT_RUN=false
-MODULES_FILE="/etc/modules"
-LD_PRELOAD_FILE="/etc/ld.so.preload"
-SSH_CONFIG_FILE="/etc/ssh/ssh_config"
+LAUNCHER="/usr/local/sbin/domotz-pi-provisioner"
+MARKER="$STATE_DIR/rerun-required"
+MOTD="/etc/motd.d/99-domotz-pi-provisioner"
+POST_UNIT="/etc/systemd/system/domotz-pi-provisioner-post-reboot.service"
+POST_UNIT_NAME="domotz-pi-provisioner-post-reboot.service"
 
-ERRORS=0
-WARNINGS=0
-EXISTING_COLLECTOR=false
-INSTALLED_THIS_RUN=false
-DOMOTZ_RESTARTED=false
-REBOOT_REQUIRED=false
-PENDING_BEFORE=0
-PENDING_AFTER=0
-ROOT_FREE_MB=0
+ERRORS=0; WARNINGS=0
+EXISTING=false; INSTALLED=false; RESTARTED=false; REBOOT_REQUIRED=false
+PENDING_BEFORE=0; PENDING_AFTER=0; FREE_MB=0
+WARNING_MESSAGES=()
+ERROR_MESSAGES=()
 
 if [[ -t 1 ]]; then
-  GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; RESET='\033[0m'
+  G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; B='\033[0;34m'; BD='\033[1m'; X='\033[0m'
 else
-  GREEN=''; RED=''; YELLOW=''; BLUE=''; BOLD=''; RESET=''
+  G=''; R=''; Y=''; B=''; BD=''; X=''
 fi
 
-pass() { echo -e "${GREEN}[PASS]${RESET} $*"; }
-fail() { echo -e "${RED}[FAIL]${RESET} $*"; ERRORS=$((ERRORS + 1)); }
-warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; WARNINGS=$((WARNINGS + 1)); }
-info() { echo -e "${BLUE}[INFO]${RESET} $*"; }
-section() {
-  echo
-  echo -e "${BOLD}==============================================================================${RESET}"
-  echo -e "${BOLD}$*${RESET}"
-  echo -e "${BOLD}==============================================================================${RESET}"
-}
-has() { command -v "$1" >/dev/null 2>&1; }
+pass(){ echo -e "${G}[PASS]${X} $*"; }
+info(){ echo -e "${B}[INFO]${X} $*"; }
+warn(){ local m="$*"; WARNINGS=$((WARNINGS+1)); WARNING_MESSAGES+=("$m"); echo -e "${Y}[WARN]${X} $m"; }
+fail(){ local m="$*"; ERRORS=$((ERRORS+1)); ERROR_MESSAGES+=("$m"); echo -e "${R}[FAIL]${X} $m"; }
+section(){ echo; echo -e "${BD}==============================================================================${X}"; echo -e "${BD}$*${X}"; echo -e "${BD}==============================================================================${X}"; }
+has(){ command -v "$1" >/dev/null 2>&1; }
 
-reject_symlink() {
-  local target="$1"
-  if [[ -L "$target" ]]; then
-    fail "Refusing to write through symbolic link: $target"
-    exit 1
+reject_symlink(){ [[ -L "$1" ]] && { fail "Refusing symbolic-link destination: $1"; exit 1; }; }
+secure_dir(){ reject_symlink "$1"; install -d -o root -g root -m "$2" "$1"; }
+backup_once(){
+  local f="$1" n
+  [[ -e "$f" ]] || return 0
+  n="$(printf '%s' "$f" | sed 's#^/##;s#/#_#g')"
+  reject_symlink "$BACKUP_DIR/$n.original"
+  if [[ ! -e "$BACKUP_DIR/$n.original" ]]; then
+    cp -a -- "$f" "$BACKUP_DIR/$n.original"
+    chown root:root "$BACKUP_DIR/$n.original"
+    pass "Created original backup of $f."
   fi
 }
+pending(){ apt list --upgradable 2>/dev/null | awk 'NR>1{n++}END{print n+0}'; }
 
-secure_directory() {
-  local directory="$1"
-  local mode="$2"
-  if [[ -L "$directory" ]]; then
-    fail "Refusing symbolic-link directory: $directory"
-    exit 1
+print_finding_guidance(){
+  local message="$1"
+  case "$message" in
+    *"NTP"*|*"clock"*"synchron"*)
+      echo "Context: The operating system did not report synchronized time."
+      echo "Check:   timedatectl status"
+      echo "Fix:     sudo timedatectl set-ntp true"
+      ;;
+    *"Raspberry Pi repository DNS"*)
+      echo "Context: The Raspberry Pi repository hostname could not be resolved."
+      echo "Check:   getent hosts archive.raspberrypi.com"
+      echo "Fix:     Verify DNS, gateway, and Internet connectivity."
+      ;;
+    *"update(s) remain"*|*"updates remain"*)
+      echo "Context: APT still reports packages eligible for upgrade."
+      echo "Check:   apt list --upgradable 2>/dev/null"
+      echo "Fix:     Review holds, repository policy, and dependency constraints."
+      ;;
+    *"package remov"*|*"removals"*)
+      echo "Context: The simulated full upgrade proposed or performed package removals."
+      echo "Review:  $UPGRADE_PLAN"
+      echo "Check:   sudo apt-get check && sudo dpkg --audit"
+      ;;
+    *"/dev/net/tun"*|*"TUN"*)
+      echo "Context: Domotz VPN tunnel support may be unavailable."
+      echo "Check:   ls -l /dev/net/tun && lsmod | grep '^tun'"
+      echo "Fix:     sudo modprobe tun"
+      ;;
+    *"SSH client configuration"*)
+      echo "Context: The global SSH client configuration did not validate cleanly."
+      echo "Check:   ssh -G localhost >/dev/null"
+      echo "Review:  /etc/ssh/ssh_config"
+      ;;
+    *"not enabled at boot"*|*"inactive"*)
+      echo "Context: An automatic-update timer is not fully available."
+      echo "Check:   systemctl status apt-daily.timer apt-daily-upgrade.timer"
+      echo "Fix:     sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer"
+      ;;
+    *"requires a reboot"*|*"reboot requirement"*)
+      echo "Context: Updated kernel or system components are not active until reboot."
+      echo "Action:  Reboot, then confirm the automatic validation service or rerun:"
+      echo "         sudo domotz-pi-provisioner"
+      ;;
+    *"post-reboot"*|*"reboot loop"*)
+      echo "Context: Automatic final validation did not fully complete."
+      echo "Check:   sudo systemctl status $POST_UNIT_NAME"
+      echo "Logs:    sudo journalctl -u $POST_UNIT_NAME --no-pager"
+      ;;
+    *"Domotz Remote Access"*|*"existing Collector"*)
+      echo "Context: A Collector action may affect the current remote path."
+      echo "Check:   sudo snap services $DOMOTZ_SNAP"
+      echo "Logs:    sudo snap logs $DOMOTZ_SNAP -n 100"
+      ;;
+    *)
+      echo "Context: Review the full setup log for the surrounding operation."
+      echo "Log:     $LOG_FILE"
+      ;;
+  esac
+}
+
+print_findings_summary(){
+  local i message
+  if (( WARNINGS == 0 && ERRORS == 0 )); then return 0; fi
+  section "FINDINGS REQUIRING REVIEW"
+  if (( ERRORS > 0 )); then
+    for ((i=0; i<${#ERROR_MESSAGES[@]}; i++)); do
+      message="${ERROR_MESSAGES[$i]}"
+      echo -e "${R}[FAIL $((i+1))]${X} $message"
+      print_finding_guidance "$message"
+      echo
+    done
   fi
-  install -d -o root -g root -m "$mode" "$directory"
-}
-
-backup_once() {
-  local source_file="$1"
-  local backup_name
-  [[ -e "$source_file" ]] || return 0
-  backup_name="$(printf '%s' "$source_file" | sed 's#^/##;s#/#_#g')"
-  reject_symlink "$BACKUP_DIR/$backup_name.original"
-  if [[ ! -e "$BACKUP_DIR/$backup_name.original" ]]; then
-    cp -a -- "$source_file" "$BACKUP_DIR/$backup_name.original"
-    chown root:root "$BACKUP_DIR/$backup_name.original"
-    pass "Created original backup of $source_file."
-  else
-    info "Original backup already exists for $source_file."
+  if (( WARNINGS > 0 )); then
+    for ((i=0; i<${#WARNING_MESSAGES[@]}; i++)); do
+      message="${WARNING_MESSAGES[$i]}"
+      echo -e "${Y}[WARN $((i+1))]${X} $message"
+      print_finding_guidance "$message"
+      echo
+    done
   fi
+  echo "Full log: $LOG_FILE"
+  echo "Upgrade plan: $UPGRADE_PLAN"
 }
 
-count_pending_updates() {
-  apt list --upgradable 2>/dev/null | awk 'NR > 1 {count++} END {print count+0}'
-}
-
-case "$RESTART_DOMOTZ" in auto|true|false) ;; *) echo "RESTART_DOMOTZ must be auto, true, or false"; exit 1 ;; esac
-[[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "REBOOT_TIME must use HH:MM format"; exit 1; }
+case "$RESTART_DOMOTZ" in auto|true|false) ;; *) echo "RESTART_DOMOTZ must be auto, true, or false"; exit 1;; esac
+[[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "REBOOT_TIME must use HH:MM"; exit 1; }
+[[ "$MIN_FREE_ROOT_MB" =~ ^[0-9]+$ ]] || { echo "MIN_FREE_ROOT_MB must be numeric"; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -111,338 +161,103 @@ while [[ $# -gt 0 ]]; do
       cat <<'EOF'
 Usage: domotz-pi-provisioner [--yolo]
 
-  No argument    Prompt the operator to select Interactive or YOLO mode.
-  --yolo         Approve simulated package removals and reboot automatically
-                 when required. Safety checks and fatal validation failures
-                 remain enforced.
+  No argument  Prompt for Interactive or YOLO mode.
+  --yolo       Automatically approve simulated removals and one reboot cycle.
 EOF
-      exit 0
-      ;;
-    *) echo "Unknown option: $1"; exit 1 ;;
+      exit 0;;
+    *) echo "Unknown option: $1"; exit 1;;
   esac
   shift
 done
 
+[[ "$POST_REBOOT_RUN" == true ]] && { RUN_MODE="yolo"; MODE_EXPLICIT=true; }
 if [[ "$MODE_EXPLICIT" == false && -n "$RUN_MODE" ]]; then
-  case "$RUN_MODE" in interactive|yolo) MODE_EXPLICIT=true ;; *) echo "RUN_MODE must be interactive or yolo"; exit 1 ;; esac
+  case "$RUN_MODE" in interactive|yolo) MODE_EXPLICIT=true;; *) echo "RUN_MODE must be interactive or yolo"; exit 1;; esac
 fi
-
 if [[ "$MODE_EXPLICIT" == false ]]; then
-  if [[ ! -t 0 ]]; then
-    echo "No run mode selected. Run from a terminal without arguments, or use --yolo."
-    exit 1
-  fi
-
+  [[ -t 0 ]] || { echo "No run mode selected. Run from a terminal or use --yolo."; exit 1; }
   echo "Select provisioner mode:"
   echo "  1) Interactive - prompt before package removals and reboot"
   echo "  2) YOLO        - approve package removals and reboot automatically"
   while true; do
-    read -r -p "Mode [1/2]: " mode_choice
-    case "$mode_choice" in
-      1|interactive|Interactive) RUN_MODE="interactive"; break ;;
-      2|yolo|YOLO|Yolo) RUN_MODE="yolo"; break ;;
-      *) echo "Enter 1 for Interactive or 2 for YOLO." ;;
-    esac
+    read -r -p "Mode [1/2]: " choice
+    case "$choice" in 1) RUN_MODE="interactive"; break;; 2) RUN_MODE="yolo"; break;; *) echo "Enter 1 or 2.";; esac
   done
 fi
-
-case "$RUN_MODE" in interactive|yolo) ;; *) echo "RUN_MODE must be interactive or yolo"; exit 1 ;; esac
-if [[ "$RUN_MODE" == interactive && ! -t 0 ]]; then
-  echo "Interactive mode requires a terminal."
-  exit 1
-fi
-
 [[ $EUID -eq 0 ]] || { echo "Run with sudo or as root."; exit 1; }
-[[ "$MIN_FREE_ROOT_MB" =~ ^[0-9]+$ ]] || { echo "MIN_FREE_ROOT_MB must be numeric"; exit 1; }
 
-has flock || { echo "flock is required but unavailable."; exit 1; }
+has flock || { echo "flock is required."; exit 1; }
 exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "Another Domotz Pi Provisioner instance is already running."
-  exit 1
-fi
-
-secure_directory "$LOG_DIR" 0750
-secure_directory "$BACKUP_DIR" 0750
-secure_directory "$STATE_DIR" 0750
-secure_directory /etc/motd.d 0755
-reject_symlink "$LOG_FILE"
-touch "$LOG_FILE"
-chown root:root "$LOG_FILE"
-chmod 0640 "$LOG_FILE"
+flock -n 9 || { echo "Another provisioner instance is running."; exit 1; }
+secure_dir "$LOG_DIR" 0750; secure_dir "$BACKUP_DIR" 0750; secure_dir "$STATE_DIR" 0750; secure_dir /etc/motd.d 0755
+reject_symlink "$LOG_FILE"; touch "$LOG_FILE"; chown root:root "$LOG_FILE"; chmod 0640 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-if [[ "$POST_REBOOT_RUN" == true ]]; then
-  RUN_MODE="yolo"
-  MODE_EXPLICIT=true
-  info "Automatic YOLO post-reboot validation started by systemd."
-  systemctl disable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1 || true
-fi
+[[ "$POST_REBOOT_RUN" == true ]] && { info "Automatic YOLO post-reboot validation started by systemd."; systemctl disable "$POST_UNIT_NAME" >/dev/null 2>&1 || true; }
 
 section "PERSISTENT PROVISIONER COMMAND"
-CURRENT_SCRIPT="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
-LAUNCHER_REAL="$(readlink -f "$PERSISTENT_LAUNCHER" 2>/dev/null || printf '%s' "$PERSISTENT_LAUNCHER")"
-reject_symlink "$PERSISTENT_LAUNCHER"
-if [[ ! -f "$CURRENT_SCRIPT" ]]; then
-  fail "Unable to locate the running provisioner script."
-  exit 1
-elif [[ "$CURRENT_SCRIPT" == "$LAUNCHER_REAL" ]]; then
-  pass "Running from persistent provisioner command: $PERSISTENT_LAUNCHER"
-else
-  install -o root -g root -m 0755 "$CURRENT_SCRIPT" "$PERSISTENT_LAUNCHER"
-  pass "Installed persistent provisioner command: $PERSISTENT_LAUNCHER"
-fi
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"; TARGET="$(readlink -f "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
+reject_symlink "$LAUNCHER"
+if [[ "$SELF" == "$TARGET" ]]; then pass "Running from persistent command: $LAUNCHER"; else install -o root -g root -m 0755 "$SELF" "$LAUNCHER"; pass "Installed persistent command: $LAUNCHER"; fi
 
 section "DOMOTZ PI PROVISIONER"
-info "Version: $SCRIPT_VERSION"
-info "Hostname: $(hostname)"
-info "Started: $(date --iso-8601=seconds 2>/dev/null || date)"
-info "Reboot window: $REBOOT_TIME local time"
-info "Domotz restart policy: $RESTART_DOMOTZ"
-info "Run mode: $RUN_MODE"
-info "Setup log: $LOG_FILE"
+info "Version: $SCRIPT_VERSION"; info "Run mode: $RUN_MODE"; info "Post-reboot run: $POST_REBOOT_RUN"; info "Hostname: $(hostname)"
 
 section "OPERATING SYSTEM VALIDATION"
-if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  info "Operating system: ${PRETTY_NAME:-Unknown}"
-  case "${ID:-}" in
-    debian|raspbian) pass "Supported Debian-family OS detected." ;;
-    *) warn "OS does not identify as Debian or Raspbian." ;;
-  esac
-fi
-ARCHITECTURE="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-info "Architecture: $ARCHITECTURE"
-if [[ -r /proc/device-tree/model ]]; then
-  MODEL="$(tr -d '\0' < /proc/device-tree/model)"
-  info "Hardware model: $MODEL"
-  [[ "$MODEL" == *"Raspberry Pi"* ]] && pass "Raspberry Pi hardware detected." || warn "Hardware does not identify as Raspberry Pi."
-fi
-has apt-get || { fail "apt-get unavailable."; exit 1; }
-has systemctl || { fail "systemctl unavailable."; exit 1; }
-has snap || info "snap is not installed yet and will be installed during provisioning."
+if [[ -r /etc/os-release ]]; then . /etc/os-release; info "Operating system: ${PRETTY_NAME:-Unknown}"; [[ "${ID:-}" =~ ^(debian|raspbian)$ ]] && pass "Supported Debian-family OS detected." || warn "OS does not identify as Debian or Raspbian."; fi
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"; info "Architecture: $ARCH"
+if [[ -r /proc/device-tree/model ]]; then MODEL="$(tr -d '\0' </proc/device-tree/model)"; info "Hardware model: $MODEL"; [[ "$MODEL" == *"Raspberry Pi"* ]] && pass "Raspberry Pi detected." || warn "Hardware does not identify as Raspberry Pi."; fi
+getent hosts deb.debian.org >/dev/null 2>&1 && pass "DNS resolution works." || { fail "DNS resolution failed."; print_findings_summary; exit 1; }
+getent hosts archive.raspberrypi.com >/dev/null 2>&1 && pass "Raspberry Pi repository DNS works." || warn "Raspberry Pi repository DNS check failed."
+if has timedatectl; then [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] && pass "System clock reports synchronized." || warn "System clock does not report NTP synchronization."; fi
 
-section "NETWORK AND TIME VALIDATION"
-getent hosts deb.debian.org >/dev/null 2>&1 && pass "DNS resolution is working." || { fail "Unable to resolve deb.debian.org."; exit 1; }
-getent hosts archive.raspberrypi.com >/dev/null 2>&1 && pass "Raspberry Pi repository DNS works." || warn "Unable to resolve archive.raspberrypi.com."
-if has timedatectl; then
-  TIMEZONE="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  TIME_SYNC="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
-  info "System timezone: ${TIMEZONE:-Unknown}"
-  [[ "$TIME_SYNC" == yes ]] && pass "System clock reports synchronized." || warn "System clock does not report NTP synchronization."
-fi
-
-section "PRE-UPGRADE PACKAGE HEALTH"
-DPKG_AUDIT="$(dpkg --audit 2>/dev/null || true)"
-if [[ -n "$DPKG_AUDIT" ]]; then
-  fail "dpkg reports incomplete package operations:"
-  echo "$DPKG_AUDIT"
-  exit 1
-fi
-pass "dpkg audit clean."
-apt-get check >/dev/null 2>&1 && pass "APT dependency check passed." || { fail "APT dependency check failed."; exit 1; }
-
-section "APT REPOSITORY INVENTORY"
-info "Enabled APT repositories will be used for the mandatory initial update."
-if [[ -f /etc/apt/sources.list ]]; then
-  grep -E '^[[:space:]]*deb[[:space:]]' /etc/apt/sources.list || true
-fi
-find /etc/apt/sources.list.d -maxdepth 1 -type f -name '*.list' -exec grep -H -E '^[[:space:]]*deb[[:space:]]' {} + 2>/dev/null || true
-for source_file in /etc/apt/sources.list.d/*.sources; do
-  [[ -f "$source_file" ]] || continue
-  echo "[$source_file]"
-  sed -n '/^Types:/p;/^URIs:/p;/^Suites:/p;/^Components:/p;/^Signed-By:/p' "$source_file"
-done
-
-section "APT METADATA REFRESH"
-apt-get update && pass "APT metadata refreshed." || { fail "apt-get update failed."; exit 1; }
-PENDING_BEFORE="$(count_pending_updates)"
-info "Pending package updates before initial upgrade: $PENDING_BEFORE"
-
-section "DISK SPACE PREFLIGHT"
-ROOT_AVAIL_KB="$(df -Pk / | awk 'NR == 2 {print $4}')"
-ROOT_FREE_MB=$((ROOT_AVAIL_KB / 1024))
-ROOT_FREE_GB="$(awk -v kb="$ROOT_AVAIL_KB" 'BEGIN {printf "%.2f", kb/1024/1024}')"
-info "Available root filesystem space: $ROOT_FREE_GB GiB ($ROOT_FREE_MB MiB)."
-info "Minimum required free space: $MIN_FREE_ROOT_MB MiB."
-if [[ "$ROOT_FREE_MB" -lt "$MIN_FREE_ROOT_MB" ]]; then
-  fail "Insufficient free disk space for the initial system update."
-  exit 1
-fi
-pass "Disk-space preflight passed."
-
-section "FULL-UPGRADE SECURITY PREVIEW"
+section "PACKAGE HEALTH AND UPDATE PLAN"
+AUDIT="$(dpkg --audit 2>/dev/null || true)"; [[ -z "$AUDIT" ]] && pass "dpkg audit clean." || { fail "dpkg reports incomplete package operations."; echo "$AUDIT"; print_findings_summary; exit 1; }
+apt-get check >/dev/null 2>&1 && pass "APT dependency check passed." || { fail "APT dependency check failed."; print_findings_summary; exit 1; }
+apt-get update && pass "APT metadata refreshed." || { fail "apt-get update failed."; print_findings_summary; exit 1; }
+PENDING_BEFORE="$(pending)"; info "Pending updates before upgrade: $PENDING_BEFORE"
+FREE_KB="$(df -Pk / | awk 'NR==2{print $4}')"; FREE_MB=$((FREE_KB/1024)); info "Root free space: $FREE_MB MiB"
+[[ "$FREE_MB" -ge "$MIN_FREE_ROOT_MB" ]] && pass "Disk-space preflight passed." || { fail "Insufficient free disk space."; print_findings_summary; exit 1; }
 reject_symlink "$UPGRADE_PLAN"
-if apt-get --simulate full-upgrade > "$UPGRADE_PLAN" 2>&1; then
-  chown root:root "$UPGRADE_PLAN"
-  chmod 0640 "$UPGRADE_PLAN"
-  pass "Full-upgrade simulation completed."
-else
-  fail "Unable to simulate the full system upgrade."
-  tail -n 50 "$UPGRADE_PLAN" || true
-  exit 1
-fi
-
-REMOVAL_COUNT="$(grep -c '^Remv ' "$UPGRADE_PLAN" || true)"
-info "Proposed package removals: $REMOVAL_COUNT"
-if [[ "$REMOVAL_COUNT" -gt 0 ]]; then
-  warn "The full upgrade proposes removing $REMOVAL_COUNT installed package(s):"
+apt-get --simulate full-upgrade >"$UPGRADE_PLAN" 2>&1 && pass "Full-upgrade simulation completed." || { fail "Full-upgrade simulation failed."; print_findings_summary; exit 1; }
+chmod 0640 "$UPGRADE_PLAN"; chown root:root "$UPGRADE_PLAN"
+REMOVALS="$(grep -c '^Remv ' "$UPGRADE_PLAN" || true)"; info "Proposed package removals: $REMOVALS"
+if (( REMOVALS > 0 )); then
   grep '^Remv ' "$UPGRADE_PLAN"
-
-  if [[ "$RUN_MODE" == yolo ]]; then
-    warn "YOLO mode automatically approved the proposed package removals."
-  else
-    while true; do
-      read -r -p "Allow these package removals and continue? [y/N]: " removal_response
-      case "$removal_response" in
-        [Yy]|[Yy][Ee][Ss]) warn "Package removals explicitly approved."; break ;;
-        [Nn]|[Nn][Oo]|"") info "Package removals were not approved."; fail "Provisioning stopped for safety."; exit 1 ;;
-        *) echo "Please answer Y or N." ;;
-      esac
-    done
-  fi
-else
-  pass "Full-upgrade simulation proposes no package removals."
+  if [[ "$RUN_MODE" == yolo ]]; then warn "YOLO mode automatically approved $REMOVALS proposed package removals."; else read -r -p "Allow these package removals and continue? [y/N]: " a; [[ "$a" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && warn "Package removals explicitly approved." || { fail "Package removals were not approved; provisioning stopped."; print_findings_summary; exit 1; }; fi
 fi
 
 section "INITIAL SYSTEM UPDATE"
-if [[ "$PENDING_BEFORE" -gt 0 ]]; then
-  info "Installing all currently available updates before provisioning."
-  if DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confold" full-upgrade; then
-    pass "Initial full system update completed successfully."
-  else
-    fail "Initial full system update failed."
-    exit 1
-  fi
-else
-  pass "System is already fully up to date."
-fi
+if (( PENDING_BEFORE > 0 )); then DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confold" full-upgrade && pass "Full system update completed." || { fail "Full system update failed."; print_findings_summary; exit 1; }; else pass "System is already up to date."; fi
+PENDING_AFTER="$(pending)"; (( PENDING_AFTER == 0 )) && pass "No updates remain pending." || warn "$PENDING_AFTER update(s) remain pending."
 
-section "POST-UPGRADE PACKAGE HEALTH"
-DPKG_AUDIT="$(dpkg --audit 2>/dev/null || true)"
-if [[ -n "$DPKG_AUDIT" ]]; then
-  fail "dpkg reports incomplete package operations after the update:"
-  echo "$DPKG_AUDIT"
-else
-  pass "dpkg audit clean after the update."
-fi
-apt-get check >/dev/null 2>&1 && pass "APT dependency check passed after the update." || fail "APT dependency check failed after the update."
-PENDING_AFTER="$(count_pending_updates)"
-[[ "$PENDING_AFTER" -eq 0 ]] && pass "No package updates remain pending." || warn "$PENDING_AFTER package update(s) remain pending."
-
-section "REQUIRED PACKAGE INSTALLATION"
-if DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confold" snapd unattended-upgrades ca-certificates; then
-  pass "Required packages are installed."
-else
-  fail "Required package installation failed."
-  exit 1
-fi
-systemctl daemon-reload
-systemctl enable --now snapd.socket >/dev/null 2>&1 && pass "snapd.socket enabled." || { fail "Unable to enable snapd.socket."; exit 1; }
-if [[ ! -e /snap && -d /var/lib/snapd/snap ]]; then
-  ln -s /var/lib/snapd/snap /snap
-  pass "Created /snap compatibility link."
-fi
-has snap || { fail "snap command unavailable after installation."; exit 1; }
-
-section "DOMOTZ COLLECTOR"
-if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then
-  EXISTING_COLLECTOR=true
-  pass "Existing Domotz installation detected and preserved."
-else
-  if snap install "$DOMOTZ_SNAP"; then
-    INSTALLED_THIS_RUN=true
-    pass "Domotz installed."
-  else
-    fail "Domotz installation failed."
-    exit 1
-  fi
-fi
-
-section "DOMOTZ SNAP INTERFACES"
-for interface in firewall-control network-observe raw-usb shutdown system-observe; do
-  plug="$DOMOTZ_SNAP:$interface"
-  if snap connections "$DOMOTZ_SNAP" 2>/dev/null | awk -v target="$plug" '$2==target && $3!="-" {found=1} END {exit !found}'; then
-    pass "$plug is connected."
-  else
-    snap connect "$plug" && pass "$plug connected." || fail "Unable to connect $plug."
-  fi
-done
-
-section "TUN SUPPORT"
-reject_symlink "$MODULES_FILE"
-touch "$MODULES_FILE"
-if grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' "$MODULES_FILE"; then
-  pass "TUN is configured to load at boot."
-else
-  printf '\ntun\n' >> "$MODULES_FILE"
-  pass "Added TUN to $MODULES_FILE."
-fi
-modprobe tun && pass "TUN loaded." || fail "Unable to load TUN."
-[[ -c /dev/net/tun ]] && pass "/dev/net/tun available." || warn "/dev/net/tun unavailable."
-
-section "DOMOTZ COMPATIBILITY SETTINGS"
-if [[ -f "$LD_PRELOAD_FILE" ]]; then
-  reject_symlink "$LD_PRELOAD_FILE"
-  backup_once "$LD_PRELOAD_FILE"
-  sed -Ei '/^[[:space:]]*[^#].*libarmmem.*\.so[[:space:]]*$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$LD_PRELOAD_FILE"
-fi
-if [[ -f "$SSH_CONFIG_FILE" ]]; then
-  reject_symlink "$SSH_CONFIG_FILE"
-  backup_once "$SSH_CONFIG_FILE"
-  sed -Ei '/^[[:space:]]*Include[[:space:]]+\/etc\/ssh\/ssh_config\.d\/\*\.conf[[:space:]]*$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' "$SSH_CONFIG_FILE"
-  ssh -G localhost >/dev/null 2>&1 && pass "SSH client configuration parses successfully." || warn "SSH client configuration validation returned an error."
-fi
-
-section "DOMOTZ RESTART POLICY"
-SHOULD_RESTART=false
-case "$RESTART_DOMOTZ" in
-  true) SHOULD_RESTART=true ;;
-  false) SHOULD_RESTART=false ;;
-  auto) [[ "$INSTALLED_THIS_RUN" == true ]] && SHOULD_RESTART=true ;;
-esac
-if [[ "$SHOULD_RESTART" == true ]]; then
-  [[ "$EXISTING_COLLECTOR" == true ]] && warn "Restarting an existing Collector may interrupt Domotz Remote Access."
-  if snap restart "$DOMOTZ_SNAP"; then
-    DOMOTZ_RESTARTED=true
-    pass "Domotz restart completed."
-  else
-    fail "Domotz restart failed."
-  fi
-  sleep 3
-else
-  pass "Existing Domotz Collector restart skipped to preserve remote access."
-fi
-
-section "DOMOTZ SERVICE VALIDATION"
-DOMOTZ_SERVICES="$(snap services "$DOMOTZ_SNAP" 2>/dev/null || true)"
-if printf '%s\n' "$DOMOTZ_SERVICES" | awk 'NR>1 && $3=="active" {found=1} END {exit !found}'; then
-  pass "At least one Domotz service is active."
-else
-  fail "No active Domotz service detected."
-  printf '%s\n' "$DOMOTZ_SERVICES"
-fi
+section "REQUIRED PACKAGES AND DOMOTZ"
+DEBIAN_FRONTEND=noninteractive apt-get install -y snapd unattended-upgrades ca-certificates && pass "Required packages installed." || { fail "Required package installation failed."; print_findings_summary; exit 1; }
+systemctl enable --now snapd.socket >/dev/null 2>&1 && pass "snapd.socket enabled." || fail "Unable to enable snapd.socket."
+[[ -e /snap || ! -d /var/lib/snapd/snap ]] || ln -s /var/lib/snapd/snap /snap
+if snap list "$DOMOTZ_SNAP" >/dev/null 2>&1; then EXISTING=true; pass "Existing Domotz installation preserved."; else snap install "$DOMOTZ_SNAP" && { INSTALLED=true; pass "Domotz installed."; } || { fail "Domotz installation failed."; print_findings_summary; exit 1; }; fi
+for i in firewall-control network-observe raw-usb shutdown system-observe; do p="$DOMOTZ_SNAP:$i"; snap connections "$DOMOTZ_SNAP" 2>/dev/null | awk -v t="$p" '$2==t&&$3!="-"{f=1}END{exit !f}' && pass "$p is connected." || { snap connect "$p" && pass "$p connected." || fail "Unable to connect $p."; }; done
+touch /etc/modules; grep -Eq '^[[:space:]]*tun([[:space:]]*#.*)?$' /etc/modules || echo tun >>/etc/modules; modprobe tun && pass "TUN loaded." || fail "Unable to load TUN."; [[ -c /dev/net/tun ]] || warn "/dev/net/tun unavailable."
+if [[ -f /etc/ssh/ssh_config ]]; then backup_once /etc/ssh/ssh_config; sed -Ei '/^[[:space:]]*Include[[:space:]]+\/etc\/ssh\/ssh_config\.d\/\*\.conf[[:space:]]*$/ s/^([[:space:]]*)/\1# Domotz Pi Provisioner: /' /etc/ssh/ssh_config; ssh -G localhost >/dev/null 2>&1 || warn "SSH client configuration validation returned an error."; fi
+if [[ "$INSTALLED" == true || "$RESTART_DOMOTZ" == true ]]; then snap restart "$DOMOTZ_SNAP" && { RESTARTED=true; pass "Domotz restarted."; } || fail "Domotz restart failed."; else pass "Existing Domotz restart skipped to preserve remote access."; fi
+SERVICES="$(snap services "$DOMOTZ_SNAP" 2>/dev/null || true)"; printf '%s\n' "$SERVICES" | awk 'NR>1&&$3=="active"{f=1}END{exit !f}' && pass "At least one Domotz service is active." || fail "No active Domotz service detected."
 
 section "AUTOMATIC UPDATE POLICY"
-reject_symlink "$AUTO_POLICY"
-reject_symlink "$LOCAL_POLICY"
-backup_once "$AUTO_POLICY"
-backup_once "$LOCAL_POLICY"
-cat > "$AUTO_POLICY" <<'EOF'
+backup_once "$AUTO_POLICY"; backup_once "$LOCAL_POLICY"
+cat >"$AUTO_POLICY" <<'EOF'
 APT::Periodic::Enable "1";
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 EOF
-cat > "$LOCAL_POLICY" <<EOF
+cat >"$LOCAL_POLICY" <<EOF
 #clear Unattended-Upgrade::Origins-Pattern;
 Unattended-Upgrade::Origins-Pattern {
-    "origin=Debian,codename=\${distro_codename},label=Debian";
-    "origin=Debian,codename=\${distro_codename}-updates";
-    "origin=Debian,codename=\${distro_codename},label=Debian-Security";
-    "origin=Debian,codename=\${distro_codename}-security,label=Debian-Security";
-    "origin=Raspberry Pi Foundation";
+ "origin=Debian,codename=\${distro_codename},label=Debian";
+ "origin=Debian,codename=\${distro_codename}-updates";
+ "origin=Debian,codename=\${distro_codename},label=Debian-Security";
+ "origin=Debian,codename=\${distro_codename}-security,label=Debian-Security";
+ "origin=Raspberry Pi Foundation";
 };
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
@@ -450,117 +265,53 @@ Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 Unattended-Upgrade::Automatic-Reboot-Time "$REBOOT_TIME";
 EOF
-chown root:root "$AUTO_POLICY" "$LOCAL_POLICY"
-chmod 0644 "$AUTO_POLICY" "$LOCAL_POLICY"
-pass "Automatic update policies written."
-apt-config dump >/dev/null 2>&1 && pass "APT configuration parses." || fail "APT configuration parsing failed."
-for timer in apt-daily.timer apt-daily-upgrade.timer; do
-  systemctl enable --now "$timer" >/dev/null 2>&1 && pass "$timer enabled." || fail "Unable to enable $timer."
-  systemctl is-enabled --quiet "$timer" && pass "$timer enabled at boot." || fail "$timer not enabled at boot."
-  systemctl is-active --quiet "$timer" && pass "$timer active." || fail "$timer inactive."
-done
+chmod 0644 "$AUTO_POLICY" "$LOCAL_POLICY"; apt-config dump >/dev/null 2>&1 && pass "Automatic update policy validates." || fail "APT configuration parsing failed."
+for t in apt-daily.timer apt-daily-upgrade.timer; do systemctl enable --now "$t" >/dev/null 2>&1 && pass "$t enabled." || fail "Unable to enable $t."; done
 
 section "REBOOT STATUS"
-reject_symlink "$MOTD_NOTICE"
-reject_symlink "$COMPLETION_MARKER"
-reject_symlink "$POST_REBOOT_UNIT"
 if [[ -f /var/run/reboot-required ]]; then
-  REBOOT_REQUIRED=true
-  warn "System updates require a reboot."
-  touch "$COMPLETION_MARKER"
-  chown root:root "$COMPLETION_MARKER"
-  chmod 0640 "$COMPLETION_MARKER"
-
+  REBOOT_REQUIRED=true; warn "System updates require a reboot."; touch "$MARKER"
   if [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == false ]]; then
-    cat > "$POST_REBOOT_UNIT" <<EOF
+    cat >"$POST_UNIT" <<EOF
 [Unit]
 Description=Complete Domotz Pi Provisioning After Reboot
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=$COMPLETION_MARKER
-
+ConditionPathExists=$MARKER
 [Service]
 Type=oneshot
-ExecStart=$PERSISTENT_LAUNCHER --yolo --post-reboot
-StandardOutput=journal
-StandardError=journal
-
+ExecStart=$LAUNCHER --yolo --post-reboot
 [Install]
 WantedBy=multi-user.target
 EOF
-    chown root:root "$POST_REBOOT_UNIT"
-    chmod 0644 "$POST_REBOOT_UNIT"
-    systemctl daemon-reload
-    systemctl enable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1
-    pass "Installed one-time automatic post-reboot validation service."
-  elif [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == true ]]; then
-    warn "Post-reboot validation still reports another reboot requirement."
-    warn "Automatic reboot cycling has been stopped to prevent a reboot loop."
-  fi
-
-  cat > "$MOTD_NOTICE" <<'EOF'
-
+    systemctl daemon-reload; systemctl enable "$POST_UNIT_NAME" >/dev/null 2>&1; pass "Installed one-time automatic post-reboot validation service."
+  elif [[ "$POST_REBOOT_RUN" == true ]]; then warn "Automatic post-reboot validation still reports a reboot requirement; reboot loop prevented."; fi
+  cat >"$MOTD" <<EOF
 *** DOMOTZ PI PROVISIONING INCOMPLETE ***
-A reboot or final validation is still required.
-
-Guided mode selection:
-sudo domotz-pi-provisioner
-
-Fully automatic mode:
-sudo domotz-pi-provisioner --yolo
-
-Check automatic post-reboot validation:
-sudo systemctl status domotz-pi-provisioner-post-reboot.service
-sudo journalctl -u domotz-pi-provisioner-post-reboot.service --no-pager
-
+Run: sudo domotz-pi-provisioner
+Status: sudo systemctl status $POST_UNIT_NAME
+Logs: sudo journalctl -u $POST_UNIT_NAME --no-pager
 EOF
-  chown root:root "$MOTD_NOTICE"
-  chmod 0644 "$MOTD_NOTICE"
-  pass "Installed post-reboot login reminder."
 else
   pass "No reboot required."
-  if [[ -f "$COMPLETION_MARKER" ]]; then
-    rm -f -- "$COMPLETION_MARKER" "$MOTD_NOTICE"
-    systemctl disable "$POST_REBOOT_UNIT_NAME" >/dev/null 2>&1 || true
-    rm -f -- "$POST_REBOOT_UNIT"
-    systemctl daemon-reload
-    pass "Post-reboot validation complete; reminder and temporary service removed."
-  fi
+  if [[ -f "$MARKER" ]]; then rm -f "$MARKER" "$MOTD" "$POST_UNIT"; systemctl disable "$POST_UNIT_NAME" >/dev/null 2>&1 || true; systemctl daemon-reload; pass "Post-reboot validation complete; temporary reminder and service removed."; fi
 fi
 
 section "FINAL DEPLOYMENT REPORT"
-printf 'Version:             %s\nRun mode:            %s\nPost-reboot run:     %s\nHostname:            %s\nArchitecture:        %s\nUpdates before:      %s\nRoot free preflight: %s MiB\nUpdates remaining:   %s\nExisting collector:  %s\nInstalled this run:  %s\nDomotz restarted:    %s\nReboot required:     %s\nSetup log:           %s\nUpgrade plan:        %s\nErrors:              %s\nWarnings:            %s\n' \
-  "$SCRIPT_VERSION" "$RUN_MODE" "$POST_REBOOT_RUN" "$(hostname)" "$ARCHITECTURE" "$PENDING_BEFORE" "$ROOT_FREE_MB" "$PENDING_AFTER" \
-  "$EXISTING_COLLECTOR" "$INSTALLED_THIS_RUN" "$DOMOTZ_RESTARTED" "$REBOOT_REQUIRED" \
-  "$LOG_FILE" "$UPGRADE_PLAN" "$ERRORS" "$WARNINGS"
+printf 'Version:             %s\nRun mode:            %s\nPost-reboot run:     %s\nHostname:            %s\nArchitecture:        %s\nUpdates before:      %s\nUpdates remaining:   %s\nExisting collector:  %s\nInstalled this run:  %s\nDomotz restarted:    %s\nReboot required:     %s\nErrors:              %s\nWarnings:            %s\n' "$SCRIPT_VERSION" "$RUN_MODE" "$POST_REBOOT_RUN" "$(hostname)" "$ARCH" "$PENDING_BEFORE" "$PENDING_AFTER" "$EXISTING" "$INSTALLED" "$RESTARTED" "$REBOOT_REQUIRED" "$ERRORS" "$WARNINGS"
+print_findings_summary
 
-if [[ "$ERRORS" -eq 0 ]]; then
-  echo -e "${GREEN}${BOLD}DOMOTZ PI PROVISIONER VALIDATION PASSED${RESET}"
-  [[ "$WARNINGS" -gt 0 ]] && echo "Validation passed with $WARNINGS warning(s); review [WARN] entries above."
+section "FINAL STATUS"
+if (( ERRORS == 0 )); then
+  echo -e "${G}${BD}DOMOTZ PI PROVISIONER VALIDATION PASSED${X}"
+  (( WARNINGS > 0 )) && echo "Validation passed with $WARNINGS warning(s). Review the findings summary above."
   if [[ "$REBOOT_REQUIRED" == true ]]; then
-    if [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == false ]]; then
-      warn "YOLO mode approved the required reboot. Rebooting now."
-      sync
-      systemctl reboot
-      exit 0
-    elif [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == true ]]; then
-      warn "Automatic post-reboot validation did not clear the reboot requirement."
-      warn "No additional automatic reboot will be performed. Review the MOTD and service journal."
-      exit 0
-    fi
-
-    while true; do
-      read -r -p "Reboot required. Reboot now? [y/N]: " response
-      case "$response" in
-        [Yy]|[Yy][Ee][Ss]) info "Rebooting now."; sync; systemctl reboot; exit 0 ;;
-        [Nn]|[Nn][Oo]|"") info "Reboot deferred. Run sudo domotz-pi-provisioner after reboot."; break ;;
-        *) echo "Please answer Y or N." ;;
-      esac
-    done
+    if [[ "$RUN_MODE" == yolo && "$POST_REBOOT_RUN" == false ]]; then warn "YOLO mode approved the required reboot. Rebooting now."; sync; systemctl reboot
+    elif [[ "$POST_REBOOT_RUN" == true ]]; then warn "No additional automatic reboot will be performed. Review the findings and MOTD."
+    else read -r -p "Reboot required. Reboot now? [y/N]: " a; [[ "$a" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && { sync; systemctl reboot; } || info "Reboot deferred."; fi
   fi
   exit 0
 else
-  echo -e "${RED}${BOLD}DOMOTZ PI PROVISIONER VALIDATION FAILED${RESET}"
-  echo "Review [FAIL] entries and $LOG_FILE."
+  echo -e "${R}${BD}DOMOTZ PI PROVISIONER VALIDATION FAILED${X}"
   exit 1
 fi
