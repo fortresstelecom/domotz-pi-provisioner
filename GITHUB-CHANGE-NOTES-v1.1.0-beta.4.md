@@ -40,3 +40,14 @@ Changes:
 ```text
 Domotz Pi Provisioner v1.1.0-beta.4
 ```
+
+## Additional beta.4 fix
+
+```text
+- Detect the installed dynavlan version before invoking its installer.
+- Skip reinstall when the requested dynavlan version is already installed.
+- Preserve existing dynavlan configuration on same-version reruns.
+- Upgrade dynavlan only when the installed version differs from the requested version.
+- Run dynavlan --reapply after a dynavlan version upgrade before continuing.
+- Avoid unnecessary timer stops, lock waits, dependency work, and file replacement on idempotent provisioner reruns.
+```

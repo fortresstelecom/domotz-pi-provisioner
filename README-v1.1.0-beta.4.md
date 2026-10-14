@@ -73,3 +73,7 @@ sudo domotz-pi-provisioner --yolo --discover-vlans
 ## License
 
 MIT
+
+## Idempotent dynavlan installation
+
+Beta.4 checks the currently installed dynavlan version before invoking the installer. If the requested version is already present, the reinstall is skipped and the existing configuration is preserved. If a different version is installed, the provisioner performs the upgrade and runs `dynavlan --reapply` before continuing to the deployment workflow.

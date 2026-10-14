@@ -480,13 +480,34 @@ configure_dynavlan_activation(){
 
 install_dynavlan(){
   section 'DYNAVLAN INSTALLATION'
-  local installer='/tmp/dynavlan-get.sh'
-  curl -fsSL 'https://raw.githubusercontent.com/pereljon/dynavlan/main/get.sh' -o "$installer" || return 1
-  chmod 0700 "$installer"; bash "$installer" "$DYNAVLAN_VERSION" || return 1
-  command -v dynavlan >/dev/null || return 1
-  if grep -q '^#*RESTART_SNAPS=' /etc/dynavlan.conf; then sed -Ei 's|^#*RESTART_SNAPS=.*|RESTART_SNAPS="domotzpro-agent-publicstore"|' /etc/dynavlan.conf; else printf '\nRESTART_SNAPS="domotzpro-agent-publicstore"\n' >>/etc/dynavlan.conf; fi
-  dynavlan --version; systemctl disable --now dynavlan.service dynavlan.timer >/dev/null 2>&1 || true
-  DYNAVLAN_INSTALLED=true; pass 'dynavlan installed and configured.'
+  local installer='/tmp/dynavlan-get.sh' installed_version='' requested_version
+  requested_version="${DYNAVLAN_VERSION#v}"
+  if command -v dynavlan >/dev/null 2>&1; then
+    installed_version="$(dynavlan --version 2>/dev/null | awk 'NR==1{print $2}')"
+  fi
+
+  if [[ -n "$installed_version" && "$installed_version" == "$requested_version" ]]; then
+    pass "dynavlan v$installed_version is already installed."
+    info 'Skipping dynavlan reinstall.'
+  else
+    if [[ -n "$installed_version" ]]; then info "Upgrading dynavlan from v$installed_version to $DYNAVLAN_VERSION."; else info "Installing dynavlan $DYNAVLAN_VERSION."; fi
+    curl -fsSL 'https://raw.githubusercontent.com/pereljon/dynavlan/main/get.sh' -o "$installer" || { fail 'Unable to download dynavlan installer.'; return 1; }
+    chmod 0700 "$installer"; bash "$installer" "$DYNAVLAN_VERSION" || { fail 'dynavlan installation or upgrade failed.'; return 1; }
+    command -v dynavlan >/dev/null 2>&1 || { fail 'dynavlan command missing after installation.'; return 1; }
+    if [[ -n "$installed_version" ]]; then
+      info 'Reapplying existing VLAN configuration for the new dynavlan build.'
+      dynavlan --reapply || { fail 'dynavlan --reapply failed after upgrade.'; return 1; }
+    fi
+  fi
+
+  if [[ -f /etc/dynavlan.conf ]]; then
+    if grep -q '^#*RESTART_SNAPS=' /etc/dynavlan.conf; then sed -Ei 's|^#*RESTART_SNAPS=.*|RESTART_SNAPS="domotzpro-agent-publicstore"|' /etc/dynavlan.conf; else printf '\nRESTART_SNAPS="domotzpro-agent-publicstore"\n' >>/etc/dynavlan.conf; fi
+  else
+    fail '/etc/dynavlan.conf is missing.'; return 1
+  fi
+  dynavlan --version
+  DYNAVLAN_INSTALLED=true
+  pass 'dynavlan installation and Domotz integration validated.'
   configure_dynavlan_activation
 }
 
