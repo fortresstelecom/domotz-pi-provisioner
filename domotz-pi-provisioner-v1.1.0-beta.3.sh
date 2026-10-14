@@ -23,6 +23,7 @@ ROLLBACK_SCRIPT='/usr/local/sbin/domotz-network-rollback'
 ROLLBACK_UNIT='domotz-network-migration-rollback'
 BASE_NETPLAN='/etc/netplan/01-domotz-uplink.yaml'
 LAUNCHER='/usr/local/sbin/domotz-pi-provisioner'
+LOGIN_NOTICE='/etc/profile.d/domotz-network-migration.sh'
 ERRORS=0; WARNINGS=0
 MIGRATION_REQUIRED=false; MIGRATION_COMMITTED=false; DYNAVLAN_INSTALLED=false
 MGMT_IF=''; MGMT_MAC=''; MGMT_IP=''; MGMT_PREFIX=''; MGMT_GW=''; MGMT_CONN=''; IPV4_METHOD=''; DNS_SERVERS=''
@@ -74,6 +75,7 @@ commit_pending(){
   [[ "${MIGRATION_PENDING:-false}" == true ]] || { echo 'No pending migration was found.'; exit 1; }
   cleanup_transient_units
   sed -i 's/^MIGRATION_PENDING=.*/MIGRATION_PENDING=false/' "$STATE_FILE"
+  rm -f "$LOGIN_NOTICE"
   pass 'Pending network migration committed; automatic rollback canceled.'
   exit 0
 }
@@ -83,8 +85,22 @@ rollback_now(){
   "$ROLLBACK_SCRIPT"
   exit $?
 }
+pending_migration_menu(){
+  load_state
+  [[ "${MIGRATION_PENDING:-false}" == true ]] || return 1
+  local remaining current_ip choice
+  remaining=$(( ${ROLLBACK_EPOCH:-0} - $(date +%s) )); ((remaining < 0)) && remaining=0
+  current_ip="$(ip -4 route get "${MGMT_GW:-1.1.1.1}" 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}')"
+  section 'PENDING NETWORK MIGRATION'
+  printf 'Interface:       %s\nMAC address:     %s\nOriginal IP:     %s\nCurrent IP:      %s\nRollback at:     %s\nTime remaining:  %02d:%02d\n' "${MGMT_IF:-unknown}" "${MGMT_MAC:-unknown}" "${MGMT_IP:-unknown}" "${current_ip:-unknown}" "${ROLLBACK_TEXT:-unknown}" $((remaining/60)) $((remaining%60))
+  echo; echo 'What would you like to do?'; echo '  K) Keep the new network configuration'; echo '  R) Restore the previous network configuration now'
+  while true; do read -r -p 'Choice [K/R]: ' choice; case "$choice" in k|K) commit_pending;; r|R) rollback_now;; *) echo 'Enter K or R.';; esac; done
+}
 [[ "$ACTION" == commit ]] && commit_pending
 [[ "$ACTION" == rollback ]] && rollback_now
+if [[ "$ACTION" == provision && -r "$STATE_FILE" ]]; then
+  pending_migration_menu || true
+fi
 
 if [[ -z "$MODE" ]]; then
   [[ -t 0 ]] || { echo 'Run from an interactive terminal or use --yolo.'; exit 2; }
@@ -94,15 +110,18 @@ fi
 
 choose_rollback_window(){
   [[ "$MODE" == interactive ]] || return 0
-  local choice minutes
-  echo; echo 'Select automatic rollback window:'
-  echo '  1) 3 minutes'; echo '  2) 5 minutes'; echo '  3) 10 minutes'; echo '  4) 15 minutes'; echo '  5) Custom'
-  read -r -p 'Rollback window [1-5, default 2]: ' choice
-  case "${choice:-2}" in
-    1) ROLLBACK_SECONDS=180;; 2) ROLLBACK_SECONDS=300;; 3) ROLLBACK_SECONDS=600;; 4) ROLLBACK_SECONDS=900;;
-    5) read -r -p 'Custom rollback window in minutes [3-30]: ' minutes; [[ "$minutes" =~ ^[0-9]+$ ]] && ((minutes>=3 && minutes<=30)) || { fail 'Custom rollback window must be 3-30 minutes.'; return 1; }; ROLLBACK_SECONDS=$((minutes*60));;
-    *) fail 'Invalid rollback-window selection.'; return 1;;
-  esac
+  local minutes
+  echo
+  while true; do
+    read -r -p 'Rollback window in minutes [3-30, default 5]: ' minutes
+    minutes="${minutes:-5}"
+    if [[ "$minutes" =~ ^[0-9]+$ ]] && ((minutes >= 3 && minutes <= 30)); then
+      ROLLBACK_SECONDS=$((minutes * 60))
+      pass "Rollback window set to $minutes minutes."
+      return 0
+    fi
+    warn 'Enter a whole number from 3 through 30.'
+  done
 }
 
 snapshot_management(){
@@ -139,8 +158,18 @@ migration_warning(){
   echo 'This collector currently uses NetworkManager and will be migrated to systemd-networkd.'
   echo; echo 'IMPORTANT: The DHCP IP address MAY CHANGE during this migration.'; echo
   printf '  Interface:       %s\n  MAC address:     %s\n  Current IP:      %s/%s\n  Default gateway: %s\n  Rollback window: %s minutes\n' "$MGMT_IF" "$MGMT_MAC" "$MGMT_IP" "$MGMT_PREFIX" "$MGMT_GW" "$minutes"
-  echo; echo 'If SSH disconnects, locate the MAC address in the switch, firewall, DHCP lease table, or ARP table.'
-  echo "After reconnecting, commit with: sudo $LAUNCHER --commit-network-migration"
+  echo; echo 'If SSH disconnects, locate the device using the MAC address above and reconnect to its current IP address.'
+  echo
+  echo 'After reconnecting, run:'
+  echo
+  echo '  sudo domotz-pi-provisioner'
+  echo
+  echo 'to confirm the networking update.'
+  echo
+  echo 'Your next login will display the migration status and the next steps.'
+  echo 'If the migration is not confirmed before the rollback timer expires,'
+  echo 'the previous network configuration will be restored automatically.'
+  echo
   echo 'Automatic rollback will be armed before network changes are applied.'
 }
 
@@ -184,6 +213,24 @@ EOF
   chmod 0700 "$ROLLBACK_SCRIPT"
 }
 
+write_login_notice(){
+  cat >"$LOGIN_NOTICE" <<EOF
+#!/usr/bin/env bash
+STATE_FILE='$STATE_FILE'
+[[ -r "\$STATE_FILE" ]] || exit 0
+. "\$STATE_FILE"
+[[ "\${MIGRATION_PENDING:-false}" == true ]] || exit 0
+now=\$(date +%s)
+remaining=\$(( \${ROLLBACK_EPOCH:-0} - now )); ((remaining < 0)) && remaining=0
+current_ip=\$(ip -4 route get "\${MGMT_GW:-1.1.1.1}" 2>/dev/null | awk '{for(i=1;i<=NF;i++)if(\$i=="src"){print \$(i+1);exit}}')
+printf '\n==============================================================================\nDOMOTZ NETWORK MIGRATION PENDING\n==============================================================================\n\n'
+printf 'A network migration is awaiting confirmation.\n\n'
+printf 'Interface:       %s\nMAC address:     %s\nOriginal IP:     %s\nCurrent IP:      %s\nRollback at:     %s\nTime remaining:  %02d:%02d\n\n' "\${MGMT_IF:-unknown}" "\${MGMT_MAC:-unknown}" "\${MGMT_IP:-unknown}" "\${current_ip:-unknown}" "\${ROLLBACK_TEXT:-unknown}" \$((remaining/60)) \$((remaining%60))
+printf 'Run:\n\n  sudo domotz-pi-provisioner\n\nto review and confirm or roll back the networking update.\n\nDoing nothing will automatically restore the previous network configuration.\n==============================================================================\n\n'
+EOF
+  chown root:root "$LOGIN_NOTICE"; chmod 0644 "$LOGIN_NOTICE"
+}
+
 arm_rollback(){
   local now
   write_rollback_script
@@ -197,13 +244,14 @@ MGMT_GW='$MGMT_GW'
 ROLLBACK_EPOCH='$ROLLBACK_EPOCH'
 ROLLBACK_TEXT='$ROLLBACK_TEXT'
 EOF
-  chmod 0600 "$STATE_FILE"
+  chmod 0644 "$STATE_FILE"
+  write_login_notice
   cleanup_transient_units
   systemd-run --unit="$ROLLBACK_UNIT" --on-active="${ROLLBACK_SECONDS}s" "$ROLLBACK_SCRIPT" >/dev/null
   pass "Rollback ARMED for $ROLLBACK_SECONDS seconds."; info "Rollback scheduled: $ROLLBACK_TEXT"
 }
 
-disarm_rollback(){ cleanup_transient_units; sed -i 's/^MIGRATION_PENDING=.*/MIGRATION_PENDING=false/' "$STATE_FILE"; MIGRATION_COMMITTED=true; pass 'Rollback canceled; migration COMMITTED.'; }
+disarm_rollback(){ cleanup_transient_units; sed -i 's/^MIGRATION_PENDING=.*/MIGRATION_PENDING=false/' "$STATE_FILE"; rm -f "$LOGIN_NOTICE"; MIGRATION_COMMITTED=true; pass 'Rollback canceled; migration COMMITTED.'; }
 
 write_networkd_netplan(){
   local addresses dns_yaml=''
@@ -274,7 +322,7 @@ postflight(){
 interactive_commit(){
   section 'NETWORK MIGRATION SAFETY WINDOW'
   printf 'Interface:       %s\nMAC address:     %s\nOriginal IP:     %s\nCurrent IP:      %s\nRollback at:     %s\n' "$MGMT_IF" "$MGMT_MAC" "$MGMT_IP" "$POST_IP" "$ROLLBACK_TEXT"
-  echo "If reconnected in another session, run: sudo $LAUNCHER --commit-network-migration"
+  echo 'If reconnected in another session, run: sudo domotz-pi-provisioner'
   local remaining response
   while true; do
     remaining=$((ROLLBACK_EPOCH-$(date +%s)))
