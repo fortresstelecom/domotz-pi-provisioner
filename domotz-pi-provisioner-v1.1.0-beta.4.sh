@@ -146,6 +146,25 @@ snapshot_management(){
   [[ -n "$MGMT_IF" && -n "$MGMT_MAC" && -n "$MGMT_IP" && -n "$MGMT_PREFIX" && -n "$MGMT_GW" && -n "$MGMT_CONN" ]]
 }
 
+ensure_network_migration_prerequisites(){
+  section 'NETWORK MIGRATION PREREQUISITES'
+  local packages=()
+
+  command -v netplan >/dev/null 2>&1 || packages+=(netplan.io)
+
+  if ((${#packages[@]} == 0)); then
+    pass 'Required network migration packages are already installed.'
+    return 0
+  fi
+
+  info "Installing required network migration package(s): ${packages[*]}"
+  apt-get update || { fail 'Unable to refresh APT package lists for migration prerequisites.'; return 1; }
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}" || { fail 'Unable to install network migration prerequisites.'; return 1; }
+
+  command -v netplan >/dev/null 2>&1 || { fail 'netplan is unavailable after installing netplan.io.'; return 1; }
+  pass 'Network migration prerequisites installed and validated.'
+}
+
 preflight(){
   section 'NETWORK MIGRATION PREFLIGHT'
   local cmd
@@ -565,7 +584,8 @@ section "DOMOTZ PI PROVISIONER $VERSION"
 info "Mode: $MODE"; install -o root -g root -m 0755 "$0" "$LAUNCHER"
 if systemctl is-active --quiet NetworkManager; then MIGRATION_REQUIRED=true; fi
 if [[ "$MIGRATION_REQUIRED" == true ]]; then
-  preflight || { section 'PROVISIONING STOPPED'; echo 'Preflight failed. No updates or dynavlan changes attempted.'; exit 1; }
+  ensure_network_migration_prerequisites || { section 'PROVISIONING STOPPED'; echo 'Required network migration packages could not be installed. No network changes were attempted.'; exit 1; }
+  preflight || { section 'PROVISIONING STOPPED'; echo 'Preflight failed. No network migration, full upgrade, or dynavlan changes were attempted.'; exit 1; }
   choose_rollback_window || exit 1
   migration_warning
   if [[ "$MODE" == interactive ]]; then read -r -p 'Proceed with migration? [y/N]: ' answer; [[ "$answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] || { info 'Migration declined. Provisioning stopped.'; exit 0; }; fi

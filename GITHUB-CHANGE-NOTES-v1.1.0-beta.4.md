@@ -75,3 +75,13 @@ Domotz Pi Provisioner v1.1.0-beta.4
 - Replace internal two-pass removal wording with clearer technician-facing validation language.
 - Remove the redundant final VLAN activation management sentence.
 ```
+
+```text
+- Add a network-migration prerequisite stage before migration preflight.
+- Detect when the netplan command is missing on a fresh Raspberry Pi OS installation.
+- Install netplan.io automatically through APT when required.
+- Validate that netplan is available after prerequisite installation.
+- Stop before network changes when required migration packages cannot be installed.
+- Keep prerequisite installation separate from the later full system upgrade.
+- Improve fresh-install failure messaging to distinguish prerequisite failures from migration failures.
+```

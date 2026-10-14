@@ -97,3 +97,7 @@ The valid maximum is shown explicitly. Pressing Enter selects 1000. Invalid valu
 The final `dynavlan --status` verification now runs behind a same-line spinner and elapsed timer because the status command performs its own detection pass. Full status output is printed after completion and saved to `/var/log/domotz-pi-provisioner/dynavlan-status.log`.
 
 The apply-stage message now reads `Verifying detected VLANs before making network changes.` The redundant final sentence about provisioner-managed activation was removed because the final report already states the selected VLAN activation mode.
+
+## Fresh Raspberry Pi OS prerequisite handling
+
+Before migration preflight, beta.4 checks whether the `netplan` command exists. When Netplan is missing on a fresh Raspberry Pi OS installation, the provisioner refreshes APT metadata, installs `netplan.io` non-interactively, confirms the command is available, and only then begins migration preflight. This prerequisite installation does not perform the later full system upgrade.
