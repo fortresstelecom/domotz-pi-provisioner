@@ -51,3 +51,10 @@ Domotz Pi Provisioner v1.1.0-beta.4
 - Run dynavlan --reapply after a dynavlan version upgrade before continuing.
 - Avoid unnecessary timer stops, lock waits, dependency work, and file replacement on idempotent provisioner reruns.
 ```
+
+```text
+- Add a separate spinner and elapsed timer for the dynavlan VLAN-apply phase.
+- Keep the apply progress visible while dynavlan performs its second removal-confirmation pass.
+- Capture full dynavlan --boot output in dynavlan-apply.log and print it after completion.
+- Report the total VLAN-apply duration without flooding the terminal with repeated status lines.
+```

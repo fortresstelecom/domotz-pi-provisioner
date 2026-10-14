@@ -77,3 +77,7 @@ MIT
 ## Idempotent dynavlan installation
 
 Beta.4 checks the currently installed dynavlan version before invoking the installer. If the requested version is already present, the reinstall is skipped and the existing configuration is preserved. If a different version is installed, the provisioner performs the upgrade and runs `dynavlan --reapply` before continuing to the deployment workflow.
+
+## VLAN apply progress
+
+Beta.4 displays a separate same-line spinner and elapsed timer while `dynavlan --boot` performs detection, its second removal-confirmation pass, Netplan validation, VLAN lease acquisition, and Domotz restart. The complete command output is printed afterward and saved to `/var/log/domotz-pi-provisioner/dynavlan-apply.log`.

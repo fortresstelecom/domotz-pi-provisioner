@@ -28,6 +28,7 @@ DYNAVLAN_ACTIVATOR='/usr/local/sbin/domotz-dynavlan-activate'
 DYNAVLAN_ACTIVATION_SERVICE='/etc/systemd/system/domotz-dynavlan-activate.service'
 DYNAVLAN_ACTIVATION_TIMER='/etc/systemd/system/domotz-dynavlan-activate.timer'
 DYNAVLAN_DISCOVERY_LOG="$LOG_DIR/dynavlan-discovery.log"
+DYNAVLAN_APPLY_LOG="$LOG_DIR/dynavlan-apply.log"
 DISCOVER_VLANS=false
 DYNAVLAN_ACTIVATION='not-configured'
 ERRORS=0; WARNINGS=0
@@ -455,8 +456,10 @@ automated_vlan_activation(){
   info 'Starting dynavlan VLAN discovery. This preview does not modify networking.'
   run_with_spinner 'Discovering tagged VLANs' "$DYNAVLAN_DISCOVERY_LOG" dynavlan --dry-run || return 1
   grep -q 'validate:[[:space:]]*OK' "$DYNAVLAN_DISCOVERY_LOG" || { fail 'dynavlan validation did not report OK.'; return 1; }
-  pass 'dynavlan dry-run validation passed.'; info 'Applying validated VLAN configuration.'
-  dynavlan --boot || return 1
+  pass 'dynavlan dry-run validation passed.'
+  info 'Applying validated VLAN configuration.'
+  info 'dynavlan performs a second VLAN-removal confirmation pass during this step.'
+  run_with_spinner 'Applying VLAN configuration' "$DYNAVLAN_APPLY_LOG" dynavlan --boot || { fail 'dynavlan VLAN apply failed.'; return 1; }
   verify_vlan_deployment || return 1
   DYNAVLAN_ACTIVATION='applied-now'; pass 'VLAN deployment completed.'
 }
