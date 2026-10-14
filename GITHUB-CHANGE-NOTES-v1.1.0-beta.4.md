@@ -1,95 +1,22 @@
-# Domotz Pi Provisioner v1.1.0-beta.4
-
-## Commit title
+# Commit title
 
 ```text
-v1.1.0-beta.4: Automate dynavlan activation and staging workflow
+v1.1.0-beta.4: Handle networks without tagged VLAN trunks
 ```
 
-## Commit description
+# Commit description
 
 ```text
-Add automated VLAN discovery, validation, deployment, and staging controls.
+Treat a successful dynavlan discovery with no tagged VLAN trunk as a valid no-change result.
 
 Changes:
-- Ask whether the Collector is currently connected to the network it will monitor.
-- Explain the difference between monitored-network deployment and temporary staging.
-- Default the VLAN activation prompt to No.
-- Run dynavlan --dry-run automatically when immediate activation is selected.
-- Display a same-line spinner and elapsed timer while dynavlan discovery is silent.
-- Print the full dry-run result after discovery completes.
-- Require validate: OK before applying any VLAN configuration.
-- Run dynavlan --boot automatically after successful validation.
-- Verify the management default interface and gateway remain unchanged.
-- Display dynavlan status and configured VLAN interfaces.
-- Verify the Domotz service after VLAN deployment.
-- Start dynavlan.timer after successful initial activation.
-- Verify the timer reports a scheduled next run.
-- Add next-boot activation for devices staged before deployment.
-- Add scheduled date/time activation using a systemd timer.
-- Add an option to leave VLAN discovery and activation disabled.
-- Disable dynavlan boot and rescan services until the selected initial activation succeeds.
-- Add --discover-vlans for explicit immediate activation in YOLO mode.
-- Make YOLO staging-safe by leaving VLAN discovery disabled unless --discover-vlans is supplied.
-- Keep dynavlan dry-run and boot commands out of the technician's normal workflow.
-- Preserve beta.3 network migration, rollback, reconnect, DHCP identity, and Netplan permissions protections.
-```
-
-## Pre-release title
-
-```text
-Domotz Pi Provisioner v1.1.0-beta.4
-```
-
-## Additional beta.4 fix
-
-```text
-- Detect the installed dynavlan version before invoking its installer.
-- Skip reinstall when the requested dynavlan version is already installed.
-- Preserve existing dynavlan configuration on same-version reruns.
-- Upgrade dynavlan only when the installed version differs from the requested version.
-- Run dynavlan --reapply after a dynavlan version upgrade before continuing.
-- Avoid unnecessary timer stops, lock waits, dependency work, and file replacement on idempotent provisioner reruns.
-```
-
-```text
-- Add a separate spinner and elapsed timer for the dynavlan VLAN-apply phase.
-- Keep the apply progress visible while dynavlan performs its second removal-confirmation pass.
-- Capture full dynavlan --boot output in dynavlan-apply.log and print it after completion.
-- Report the total VLAN-apply duration without flooding the terminal with repeated status lines.
-```
-
-```text
-- Add an Interactive maximum-VLAN prompt before immediate VLAN discovery.
-- Show the accepted range of 1-4094 with a default maximum of 1000.
-- Warn that higher VLAN maximums may increase discovery time.
-- Reprompt when the technician enters a nonnumeric or out-of-range value.
-- Configure VLAN_MIN=1 and the selected VLAN_MAX in dynavlan.conf before discovery.
-- Include the configured VLAN discovery range in the final report.
-```
-
-```text
-- Add a separate spinner and elapsed timer for the final dynavlan status verification.
-- Capture full dynavlan --status output in dynavlan-status.log and print it after completion.
-- Verify that final status reports owned VLAN interfaces.
-- Replace internal two-pass removal wording with clearer technician-facing validation language.
-- Remove the redundant final VLAN activation management sentence.
-```
-
-```text
-- Add a network-migration prerequisite stage before migration preflight.
-- Detect when the netplan command is missing on a fresh Raspberry Pi OS installation.
-- Install netplan.io automatically through APT when required.
-- Validate that netplan is available after prerequisite installation.
-- Stop before network changes when required migration packages cannot be installed.
-- Keep prerequisite installation separate from the later full system upgrade.
-- Improve fresh-install failure messaging to distinguish prerequisite failures from migration failures.
-```
-
-```text
-- Fix a false migration-preflight failure on fresh Raspberry Pi OS installations.
-- Treat the optional NetworkManager Netplan file as optional instead of returning failure when it is absent.
-- Keep Netplan permission correction fatal only when the file exists but chmod fails.
-- Add an explicit successful preflight completion message.
-- Add an explicit return 0 at the end of migration preflight to prevent optional checks from leaking a failure status.
+- Detect dynavlan dry-run output indicating that no tagged VLAN trunk was found.
+- Report the no-trunk condition as informational instead of failing validation.
+- Skip dynavlan --boot when there are no VLAN interfaces to configure.
+- Confirm that management networking remains unchanged.
+- Start and verify dynavlan.timer so future tagged VLANs can still be discovered automatically.
+- Record the final activation state as no-tagged-vlans.
+- Continue to require validate: OK when tagged VLANs are detected.
+- Preserve durable systemd-based VLAN application when tagged VLANs are present.
+- Preserve SSH-disconnect resilience, route validation, Domotz checks, and timer verification.
 ```

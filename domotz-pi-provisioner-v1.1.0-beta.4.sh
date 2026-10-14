@@ -578,6 +578,19 @@ automated_vlan_activation(){
   section 'DYNAVLAN VLAN DISCOVERY'
   info 'Starting dynavlan VLAN discovery. This preview does not modify networking.'
   run_with_spinner 'Discovering tagged VLANs' "$DYNAVLAN_DISCOVERY_LOG" dynavlan --dry-run || return 1
+  if grep -qE 'no trunks detected|no tagged VLANs detected' "$DYNAVLAN_DISCOVERY_LOG"; then
+    info 'No tagged VLAN trunk was detected.'
+    info 'No VLAN interfaces need to be configured.'
+    pass 'Management networking remains unchanged.'
+    if verify_dynavlan_timer; then
+      pass 'Automatic VLAN rescan timer is scheduled.'
+      DYNAVLAN_ACTIVATION='no-tagged-vlans'
+      pass 'VLAN discovery completed with no tagged VLANs to apply.'
+      return 0
+    fi
+    fail 'No tagged VLANs were detected, and the automatic rescan timer could not be scheduled.'
+    return 1
+  fi
   grep -q 'validate:[[:space:]]*OK' "$DYNAVLAN_DISCOVERY_LOG" || { fail 'dynavlan validation did not report OK.'; return 1; }
   pass 'dynavlan dry-run validation passed.'
   info 'Applying validated VLAN configuration.'
