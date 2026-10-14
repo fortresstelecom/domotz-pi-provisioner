@@ -91,3 +91,9 @@ Maximum VLAN ID to discover [1-4094, default 1000]:
 ```
 
 The valid maximum is shown explicitly. Pressing Enter selects 1000. Invalid values are rejected and reprompted. The provisioner writes `VLAN_MIN=1` and the selected `VLAN_MAX` to `/etc/dynavlan.conf` before running discovery. A warning explains that higher values may increase discovery time.
+
+## Final verification progress
+
+The final `dynavlan --status` verification now runs behind a same-line spinner and elapsed timer because the status command performs its own detection pass. Full status output is printed after completion and saved to `/var/log/domotz-pi-provisioner/dynavlan-status.log`.
+
+The apply-stage message now reads `Verifying detected VLANs before making network changes.` The redundant final sentence about provisioner-managed activation was removed because the final report already states the selected VLAN activation mode.

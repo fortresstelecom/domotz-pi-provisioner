@@ -67,3 +67,11 @@ Domotz Pi Provisioner v1.1.0-beta.4
 - Configure VLAN_MIN=1 and the selected VLAN_MAX in dynavlan.conf before discovery.
 - Include the configured VLAN discovery range in the final report.
 ```
+
+```text
+- Add a separate spinner and elapsed timer for the final dynavlan status verification.
+- Capture full dynavlan --status output in dynavlan-status.log and print it after completion.
+- Verify that final status reports owned VLAN interfaces.
+- Replace internal two-pass removal wording with clearer technician-facing validation language.
+- Remove the redundant final VLAN activation management sentence.
+```

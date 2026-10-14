@@ -29,6 +29,7 @@ DYNAVLAN_ACTIVATION_SERVICE='/etc/systemd/system/domotz-dynavlan-activate.servic
 DYNAVLAN_ACTIVATION_TIMER='/etc/systemd/system/domotz-dynavlan-activate.timer'
 DYNAVLAN_DISCOVERY_LOG="$LOG_DIR/dynavlan-discovery.log"
 DYNAVLAN_APPLY_LOG="$LOG_DIR/dynavlan-apply.log"
+DYNAVLAN_STATUS_LOG="$LOG_DIR/dynavlan-status.log"
 DISCOVER_VLANS=false
 DYNAVLAN_ACTIVATION='not-configured'
 VLAN_MAX_SELECTED=1000
@@ -370,7 +371,10 @@ verify_vlan_deployment(){
   default_gw="$(ip -4 route show default | awk 'NR==1{for(i=1;i<=NF;i++)if($i=="via"){print $(i+1);exit}}')"
   [[ "$default_if" == "$MGMT_IF" ]] && pass 'Management default-route interface preserved.' || return 1
   [[ "$default_gw" == "$MGMT_GW" ]] && pass 'Management default gateway preserved.' || return 1
-  dynavlan --status || return 1
+  info 'Verifying final VLAN configuration.'
+  run_with_spinner 'Verifying VLAN configuration' "$DYNAVLAN_STATUS_LOG" dynavlan --status || { fail 'Final dynavlan status validation failed.'; return 1; }
+  grep -q 'configured (owned):' "$DYNAVLAN_STATUS_LOG" || { fail 'Final dynavlan status did not report owned VLAN interfaces.'; return 1; }
+  pass 'Final VLAN configuration verified.'
   snap services "$DOMOTZ_SNAP" 2>/dev/null | awk 'NR>1&&$3=="active"{f=1}END{exit !f}' && pass 'Domotz service is active after VLAN deployment.' || warn 'Domotz service is not active after VLAN deployment.'
   verify_dynavlan_timer && pass 'Automatic VLAN rescan timer is scheduled.' || return 1
 }
@@ -496,7 +500,7 @@ automated_vlan_activation(){
   grep -q 'validate:[[:space:]]*OK' "$DYNAVLAN_DISCOVERY_LOG" || { fail 'dynavlan validation did not report OK.'; return 1; }
   pass 'dynavlan dry-run validation passed.'
   info 'Applying validated VLAN configuration.'
-  info 'dynavlan performs a second VLAN-removal confirmation pass during this step.'
+  info 'Verifying detected VLANs before making network changes.'
   run_with_spinner 'Applying VLAN configuration' "$DYNAVLAN_APPLY_LOG" dynavlan --boot || { fail 'dynavlan VLAN apply failed.'; return 1; }
   verify_vlan_deployment || return 1
   DYNAVLAN_ACTIVATION='applied-now'; pass 'VLAN deployment completed.'
@@ -579,4 +583,3 @@ install_dynavlan || exit 1
 section 'FINAL REPORT'
 printf 'Version:               %s\nMode:                  %s\nManagement interface:  %s\nMAC address:            %s\nOriginal IP:            %s\nPost-migration IP:      %s\nNetwork migrated:       %s\nMigration committed:    %s\nRollback timeout:       %s seconds\nDynavlan installed:     %s\nVLAN activation:        %s\nVLAN discovery range:   1-%s\nErrors:                 %s\nWarnings:               %s\n' "$VERSION" "$MODE" "${MGMT_IF:-unknown}" "${MGMT_MAC:-unknown}" "${MGMT_IP:-unknown}" "${POST_IP:-unchanged/not checked}" "$MIGRATION_REQUIRED" "$MIGRATION_COMMITTED" "$ROLLBACK_SECONDS" "$DYNAVLAN_INSTALLED" "$DYNAVLAN_ACTIVATION" "$VLAN_MAX_SELECTED" "$ERRORS" "$WARNINGS"
 pass 'BETA PROVISIONING COMPLETED.'
-echo 'VLAN activation is managed by the provisioner according to the selected deployment mode.'
