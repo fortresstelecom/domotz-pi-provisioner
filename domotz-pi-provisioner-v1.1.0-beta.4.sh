@@ -178,7 +178,14 @@ preflight(){
   getent hosts portal.domotz.com >/dev/null 2>&1 && pass 'DNS resolution works.' || { fail 'DNS resolution failed.'; return 1; }
   curl -fsSIL --connect-timeout 10 --max-time 15 "$HEALTHCHECK_URL" >/dev/null && pass 'Domotz HTTPS preflight succeeded.' || { fail 'Domotz HTTPS preflight failed.'; return 1; }
   case "$IPV4_METHOD" in auto|manual) ;; *) fail "Unsupported IPv4 method: $IPV4_METHOD"; return 1;; esac
-  [[ -f /lib/netplan/00-network-manager-all.yaml ]] && chmod 0600 /lib/netplan/00-network-manager-all.yaml
+  if [[ -f /lib/netplan/00-network-manager-all.yaml ]]; then
+    chmod 0600 /lib/netplan/00-network-manager-all.yaml || { fail 'Unable to correct Netplan file permissions.'; return 1; }
+    pass 'Netplan file permissions validated.'
+  else
+    info 'Optional NetworkManager Netplan file is not present; no permission correction required.'
+  fi
+  pass 'Network migration preflight completed successfully.'
+  return 0
 }
 
 migration_warning(){

@@ -101,3 +101,7 @@ The apply-stage message now reads `Verifying detected VLANs before making networ
 ## Fresh Raspberry Pi OS prerequisite handling
 
 Before migration preflight, beta.4 checks whether the `netplan` command exists. When Netplan is missing on a fresh Raspberry Pi OS installation, the provisioner refreshes APT metadata, installs `netplan.io` non-interactively, confirms the command is available, and only then begins migration preflight. This prerequisite installation does not perform the later full system upgrade.
+
+## Preflight return-state fix
+
+The optional `/lib/netplan/00-network-manager-all.yaml` permission correction no longer determines the return status of migration preflight. When the file is absent, beta.4 reports that no correction is required and continues. Successful preflight now ends with an explicit success message and `return 0`.

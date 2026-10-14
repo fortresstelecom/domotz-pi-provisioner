@@ -85,3 +85,11 @@ Domotz Pi Provisioner v1.1.0-beta.4
 - Keep prerequisite installation separate from the later full system upgrade.
 - Improve fresh-install failure messaging to distinguish prerequisite failures from migration failures.
 ```
+
+```text
+- Fix a false migration-preflight failure on fresh Raspberry Pi OS installations.
+- Treat the optional NetworkManager Netplan file as optional instead of returning failure when it is absent.
+- Keep Netplan permission correction fatal only when the file exists but chmod fails.
+- Add an explicit successful preflight completion message.
+- Add an explicit return 0 at the end of migration preflight to prevent optional checks from leaking a failure status.
+```
