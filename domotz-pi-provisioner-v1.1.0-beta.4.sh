@@ -30,6 +30,9 @@ DYNAVLAN_ACTIVATION_TIMER='/etc/systemd/system/domotz-dynavlan-activate.timer'
 DYNAVLAN_DISCOVERY_LOG="$LOG_DIR/dynavlan-discovery.log"
 DYNAVLAN_APPLY_LOG="$LOG_DIR/dynavlan-apply.log"
 DYNAVLAN_STATUS_LOG="$LOG_DIR/dynavlan-status.log"
+DYNAVLAN_IMMEDIATE_WORKER='/usr/local/sbin/domotz-dynavlan-immediate-apply'
+DYNAVLAN_IMMEDIATE_UNIT='domotz-dynavlan-immediate-apply'
+DYNAVLAN_IMMEDIATE_STATE="$STATE_DIR/dynavlan-immediate.state"
 DISCOVER_VLANS=false
 DYNAVLAN_ACTIVATION='not-configured'
 VLAN_MAX_SELECTED=1000
@@ -519,6 +522,58 @@ VLAN_MIN=1
   info "dynavlan VLAN range configured as 1-$VLAN_MAX_SELECTED."
 }
 
+write_immediate_vlan_worker(){
+  cat >"$DYNAVLAN_IMMEDIATE_WORKER" <<EOF
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+LOG='$LOG_FILE'; APPLY_LOG='$DYNAVLAN_APPLY_LOG'; STATUS_LOG='$DYNAVLAN_STATUS_LOG'; STATE='$DYNAVLAN_IMMEDIATE_STATE'
+MGMT_IF='$MGMT_IF'; MGMT_GW='$MGMT_GW'; DOMOTZ_SNAP='$DOMOTZ_SNAP'
+exec >>"\$LOG" 2>&1
+printf 'STATUS=running\nSTARTED_EPOCH=%s\n' "\$(date +%s)" >"\$STATE"
+echo "[INFO] Durable VLAN deployment started at \$(date '+%B %-d, %Y at %-I:%M:%S %p %Z')."
+if ! dynavlan --boot >"\$APPLY_LOG" 2>&1; then cat "\$APPLY_LOG"; printf 'STATUS=failed\nSTEP=apply\n' >"\$STATE"; exit 1; fi
+cat "\$APPLY_LOG"
+default_if=\$(ip -4 route show default | awk 'NR==1{for(i=1;i<=NF;i++)if(\$i=="dev"){print \$(i+1);exit}}')
+default_gw=\$(ip -4 route show default | awk 'NR==1{for(i=1;i<=NF;i++)if(\$i=="via"){print \$(i+1);exit}}')
+[[ "\$default_if" == "\$MGMT_IF" ]] || { printf 'STATUS=failed\nSTEP=default-interface\n' >"\$STATE"; exit 1; }
+[[ "\$default_gw" == "\$MGMT_GW" ]] || { printf 'STATUS=failed\nSTEP=default-gateway\n' >"\$STATE"; exit 1; }
+if ! dynavlan --status >"\$STATUS_LOG" 2>&1; then cat "\$STATUS_LOG"; printf 'STATUS=failed\nSTEP=status\n' >"\$STATE"; exit 1; fi
+cat "\$STATUS_LOG"
+grep -q 'configured (owned):' "\$STATUS_LOG" || { printf 'STATUS=failed\nSTEP=owned-vlans\n' >"\$STATE"; exit 1; }
+snap services "\$DOMOTZ_SNAP" 2>/dev/null | awk 'NR>1&&\$3=="active"{f=1}END{exit !f}' || { printf 'STATUS=failed\nSTEP=domotz\n' >"\$STATE"; exit 1; }
+systemctl start dynavlan.timer || { printf 'STATUS=failed\nSTEP=timer-start\n' >"\$STATE"; exit 1; }
+listing=\$(systemctl list-timers dynavlan.timer --no-pager 2>/dev/null || true); printf '%s\n' "\$listing"
+grep -q 'dynavlan.timer' <<<"\$listing" && ! grep -q '^0 timers listed' <<<"\$listing" || { printf 'STATUS=failed\nSTEP=timer-verify\n' >"\$STATE"; exit 1; }
+printf 'STATUS=success\nCOMPLETED_EPOCH=%s\n' "\$(date +%s)" >"\$STATE"
+echo '[PASS] Durable VLAN deployment completed successfully.'
+EOF
+  chmod 0755 "$DYNAVLAN_IMMEDIATE_WORKER"
+}
+
+run_durable_vlan_activation(){
+  local start elapsed state status
+  write_immediate_vlan_worker
+  rm -f "$DYNAVLAN_IMMEDIATE_STATE"
+  systemctl stop "$DYNAVLAN_IMMEDIATE_UNIT.service" >/dev/null 2>&1 || true
+  systemctl reset-failed "$DYNAVLAN_IMMEDIATE_UNIT.service" >/dev/null 2>&1 || true
+  systemd-run --unit="$DYNAVLAN_IMMEDIATE_UNIT" --description='Durable Domotz dynavlan deployment' "$DYNAVLAN_IMMEDIATE_WORKER" >/dev/null || return 1
+  start="$(date +%s)"
+  info 'VLAN deployment is running as a system service and will continue if SSH disconnects.'
+  while systemctl is-active --quiet "$DYNAVLAN_IMMEDIATE_UNIT.service"; do
+    elapsed=$(( $(date +%s) - start ))
+    printf '\rApplying and verifying VLAN configuration... %02d:%02d' $((elapsed/60)) $((elapsed%60))
+    sleep 1
+  done
+  printf '\r%-78s\r' ' '
+  state="$(cat "$DYNAVLAN_IMMEDIATE_STATE" 2>/dev/null || true)"
+  status="$(awk -F= '$1=="STATUS"{print $2}' <<<"$state")"
+  [[ "$status" == success ]] && { pass 'Durable VLAN deployment completed successfully.'; return 0; }
+  fail "Durable VLAN deployment failed (${state//$'\n'/, })."
+  return 1
+}
+
 automated_vlan_activation(){
   section 'DYNAVLAN VLAN DISCOVERY'
   info 'Starting dynavlan VLAN discovery. This preview does not modify networking.'
@@ -527,8 +582,7 @@ automated_vlan_activation(){
   pass 'dynavlan dry-run validation passed.'
   info 'Applying validated VLAN configuration.'
   info 'Verifying detected VLANs before making network changes.'
-  run_with_spinner 'Applying VLAN configuration' "$DYNAVLAN_APPLY_LOG" dynavlan --boot || { fail 'dynavlan VLAN apply failed.'; return 1; }
-  verify_vlan_deployment || return 1
+  run_durable_vlan_activation || return 1
   DYNAVLAN_ACTIVATION='applied-now'; pass 'VLAN deployment completed.'
 }
 
