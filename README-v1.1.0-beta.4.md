@@ -81,3 +81,13 @@ Beta.4 checks the currently installed dynavlan version before invoking the insta
 ## VLAN apply progress
 
 Beta.4 displays a separate same-line spinner and elapsed timer while `dynavlan --boot` performs detection, its second removal-confirmation pass, Netplan validation, VLAN lease acquisition, and Domotz restart. The complete command output is printed afterward and saved to `/var/log/domotz-pi-provisioner/dynavlan-apply.log`.
+
+## Configurable VLAN discovery range
+
+Before immediate VLAN discovery, Interactive mode prompts:
+
+```text
+Maximum VLAN ID to discover [1-4094, default 1000]:
+```
+
+The valid maximum is shown explicitly. Pressing Enter selects 1000. Invalid values are rejected and reprompted. The provisioner writes `VLAN_MIN=1` and the selected `VLAN_MAX` to `/etc/dynavlan.conf` before running discovery. A warning explains that higher values may increase discovery time.

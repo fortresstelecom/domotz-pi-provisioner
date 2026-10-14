@@ -31,6 +31,7 @@ DYNAVLAN_DISCOVERY_LOG="$LOG_DIR/dynavlan-discovery.log"
 DYNAVLAN_APPLY_LOG="$LOG_DIR/dynavlan-apply.log"
 DISCOVER_VLANS=false
 DYNAVLAN_ACTIVATION='not-configured'
+VLAN_MAX_SELECTED=1000
 ERRORS=0; WARNINGS=0
 MIGRATION_REQUIRED=false; MIGRATION_COMMITTED=false; DYNAVLAN_INSTALLED=false
 MGMT_IF=''; MGMT_MAC=''; MGMT_IP=''; MGMT_PREFIX=''; MGMT_GW=''; MGMT_CONN=''; IPV4_METHOD=''; DNS_SERVERS=''
@@ -451,6 +452,43 @@ staging_options(){
   while true; do read -r -p 'Selection [1-3, default 3]: ' choice; case "${choice:-3}" in 1) schedule_next_boot; return;;2) schedule_datetime; return;;3) leave_disabled; return;;*) echo 'Enter 1, 2, or 3.';;esac;done
 }
 
+choose_vlan_max(){
+  local value
+  section 'VLAN DISCOVERY RANGE'
+  echo 'dynavlan will scan for tagged VLANs within the configured VLAN ID range.'
+  echo
+  echo 'Valid VLAN ID range: 1-4094'
+  echo 'Default maximum:      1000'
+  echo
+  echo 'Higher maximum VLAN values may increase discovery time. If you know the'
+  echo 'highest VLAN ID used at this site, you can limit discovery to that value.'
+  echo
+  while true; do
+    read -r -p 'Maximum VLAN ID to discover [1-4094, default 1000]: ' value
+    value="${value:-1000}"
+    if [[ "$value" =~ ^[0-9]+$ ]] && ((value >= 1 && value <= 4094)); then
+      VLAN_MAX_SELECTED="$value"
+      pass "VLAN discovery range set to 1-$VLAN_MAX_SELECTED."
+      break
+    fi
+    warn 'Enter a whole number from 1 through 4094, or press Enter to use 1000.'
+  done
+  if grep -qE '^[#[:space:]]*VLAN_MIN=' /etc/dynavlan.conf; then
+    sed -Ei 's|^[#[:space:]]*VLAN_MIN=.*|VLAN_MIN=1|' /etc/dynavlan.conf
+  else
+    printf '
+VLAN_MIN=1
+' >>/etc/dynavlan.conf
+  fi
+  if grep -qE '^[#[:space:]]*VLAN_MAX=' /etc/dynavlan.conf; then
+    sed -Ei "s|^[#[:space:]]*VLAN_MAX=.*|VLAN_MAX=$VLAN_MAX_SELECTED|" /etc/dynavlan.conf
+  else
+    printf 'VLAN_MAX=%s
+' "$VLAN_MAX_SELECTED" >>/etc/dynavlan.conf
+  fi
+  info "dynavlan VLAN range configured as 1-$VLAN_MAX_SELECTED."
+}
+
 automated_vlan_activation(){
   section 'DYNAVLAN VLAN DISCOVERY'
   info 'Starting dynavlan VLAN discovery. This preview does not modify networking.'
@@ -476,9 +514,14 @@ configure_dynavlan_activation(){
   echo '  [Y] Yes - discover, validate, and configure VLANs now'
   echo '  [N] No  - the device is currently being staged'; echo
   if [[ "$MODE" == yolo && "$DISCOVER_VLANS" != true ]]; then info 'YOLO defaults to staging-safe disabled VLAN discovery.'; leave_disabled; return; fi
-  [[ "$DISCOVER_VLANS" == true ]] && { automated_vlan_activation; return; }
+  [[ "$DISCOVER_VLANS" == true ]] && { choose_vlan_max; automated_vlan_activation; return; }
   read -r -p 'Configure VLANs now? [y/N]: ' answer
-  [[ "$answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && automated_vlan_activation || staging_options
+  if [[ "$answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+    choose_vlan_max
+    automated_vlan_activation
+  else
+    staging_options
+  fi
 }
 
 install_dynavlan(){
@@ -534,6 +577,6 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade && apt-
 pass 'APT update and full-upgrade completed.'
 install_dynavlan || exit 1
 section 'FINAL REPORT'
-printf 'Version:               %s\nMode:                  %s\nManagement interface:  %s\nMAC address:            %s\nOriginal IP:            %s\nPost-migration IP:      %s\nNetwork migrated:       %s\nMigration committed:    %s\nRollback timeout:       %s seconds\nDynavlan installed:     %s\nVLAN activation:        %s\nErrors:                 %s\nWarnings:               %s\n' "$VERSION" "$MODE" "${MGMT_IF:-unknown}" "${MGMT_MAC:-unknown}" "${MGMT_IP:-unknown}" "${POST_IP:-unchanged/not checked}" "$MIGRATION_REQUIRED" "$MIGRATION_COMMITTED" "$ROLLBACK_SECONDS" "$DYNAVLAN_INSTALLED" "$DYNAVLAN_ACTIVATION" "$ERRORS" "$WARNINGS"
+printf 'Version:               %s\nMode:                  %s\nManagement interface:  %s\nMAC address:            %s\nOriginal IP:            %s\nPost-migration IP:      %s\nNetwork migrated:       %s\nMigration committed:    %s\nRollback timeout:       %s seconds\nDynavlan installed:     %s\nVLAN activation:        %s\nVLAN discovery range:   1-%s\nErrors:                 %s\nWarnings:               %s\n' "$VERSION" "$MODE" "${MGMT_IF:-unknown}" "${MGMT_MAC:-unknown}" "${MGMT_IP:-unknown}" "${POST_IP:-unchanged/not checked}" "$MIGRATION_REQUIRED" "$MIGRATION_COMMITTED" "$ROLLBACK_SECONDS" "$DYNAVLAN_INSTALLED" "$DYNAVLAN_ACTIVATION" "$VLAN_MAX_SELECTED" "$ERRORS" "$WARNINGS"
 pass 'BETA PROVISIONING COMPLETED.'
 echo 'VLAN activation is managed by the provisioner according to the selected deployment mode.'

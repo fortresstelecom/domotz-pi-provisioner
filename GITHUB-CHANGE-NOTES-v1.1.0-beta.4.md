@@ -58,3 +58,12 @@ Domotz Pi Provisioner v1.1.0-beta.4
 - Capture full dynavlan --boot output in dynavlan-apply.log and print it after completion.
 - Report the total VLAN-apply duration without flooding the terminal with repeated status lines.
 ```
+
+```text
+- Add an Interactive maximum-VLAN prompt before immediate VLAN discovery.
+- Show the accepted range of 1-4094 with a default maximum of 1000.
+- Warn that higher VLAN maximums may increase discovery time.
+- Reprompt when the technician enters a nonnumeric or out-of-range value.
+- Configure VLAN_MIN=1 and the selected VLAN_MAX in dynavlan.conf before discovery.
+- Include the configured VLAN discovery range in the final report.
+```
